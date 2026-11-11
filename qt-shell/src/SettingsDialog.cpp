@@ -344,11 +344,22 @@ SettingsDialog::SettingsDialog(const AppSettings& current, UiLang lang, QWidget*
     m_chkLineNumbers = new QCheckBox(T("Show line numbers in Formatted mode (F11)", "Zeilennummern im Formatierten Modus (F11)"), editorGroup);
     m_chkFocusMode = new QCheckBox(T("Focus mode (highlight active paragraph)", "Fokus-Modus (aktiven Absatz hervorheben)"), editorGroup);
     m_chkTypewriter = new QCheckBox(T("Typewriter mode (keep cursor centered)", "Schreibmaschinen-Modus (Cursor zentrieren)"), editorGroup);
+    m_chkSingleInstance = new QCheckBox(
+        T("Open files in existing window as tabs", "Dateien im bestehenden Fenster als Tab öffnen"),
+        editorGroup
+    );
+    m_chkSingleInstance->setToolTip(
+        T(
+            "When opening files from Dolphin or the command line, reuse the running KMark window instead of starting a new window (override with kmark --new-window).",
+            "Öffnet Dateien aus Dolphin oder der Kommandozeile als neuen Tab im bereits laufenden KMark-Fenster statt in einer neuen Instanz (mit kmark --new-window übersteuerbar)."
+        )
+    );
 
     editorVBox->addWidget(m_chkWordWrap);
     editorVBox->addWidget(m_chkLineNumbers);
     editorVBox->addWidget(m_chkFocusMode);
     editorVBox->addWidget(m_chkTypewriter);
+    editorVBox->addWidget(m_chkSingleInstance);
     editorVBox->addStretch(1);
 
     leftCol->addWidget(editorGroup, 1);
@@ -556,6 +567,11 @@ SettingsDialog::SettingsDialog(const AppSettings& current, UiLang lang, QWidget*
             m_working.typewriterMode = v;
         }
     });
+    connect(m_chkSingleInstance, &QCheckBox::toggled, this, [this](bool v) {
+        if (!m_syncing) {
+            m_working.singleInstanceTabs = v;
+        }
+    });
 
     populatePresetCombo();
     loadWorkingIntoControls();
@@ -633,6 +649,7 @@ void SettingsDialog::loadWorkingIntoControls() {
     m_chkLineNumbers->setChecked(m_working.showLineNumbers);
     m_chkFocusMode->setChecked(m_working.focusMode);
     m_chkTypewriter->setChecked(m_working.typewriterMode);
+    m_chkSingleInstance->setChecked(m_working.singleInstanceTabs);
 
     populatePresetCombo();
     m_previewCanvas->update();

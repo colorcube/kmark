@@ -529,12 +529,14 @@ impl Session {
         };
         tab.reparse();
 
-        // Replace single untouched empty startup tab
+        // Replace single untouched startup or Quick Guide tab
         if self.tabs.len() == 1
             && let Some(first) = self.tabs.first()
             && first.path.is_none()
             && !first.is_dirty()
-            && first.rope.is_empty()
+            && (first.rope.is_empty()
+                || first.title == UiLanguage::English.quick_guide_title()
+                || first.title == UiLanguage::German.quick_guide_title())
         {
             self.tabs[0] = tab;
             self.active_tab = 0;

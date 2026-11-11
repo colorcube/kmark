@@ -36,6 +36,7 @@
 #include <QStatusBar>
 #include <QTextDocument>
 #include <QToolButton>
+#include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -634,24 +635,89 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::openPathFromCli(const QString& path) {
-    const QFileInfo fi(path);
-    if (fi.isDir()) {
-        setFolderRoot(fi.absoluteFilePath());
+    openPathWithBaseDir(path, QDir::currentPath());
+}
+
+void MainWindow::openPathWithBaseDir(const QString& rawPath, const QString& baseDir) {
+    if (rawPath.isEmpty()) {
+        return;
+    }
+
+    QString localTarget;
+    if (rawPath.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive)) {
+        const QUrl url(rawPath);
+        if (!url.isLocalFile()) {
+            return;
+        }
+        localTarget = url.toLocalFile();
+    } else if (rawPath.contains(QStringLiteral("://"))) {
+        const QUrl url(rawPath);
+        if (url.isValid() && !url.scheme().isEmpty() && !url.isLocalFile()) {
+            QMessageBox::warning(
+                this,
+                T("Unsupported URL", "Nicht unterstützte Adresse"),
+                T("Only local files can be opened: %1", "Es können nur lokale Dateien geöffnet werden: %1")
+                    .arg(rawPath)
+            );
+            return;
+        }
+        localTarget = rawPath;
+    } else {
+        localTarget = rawPath;
+    }
+
+    QFileInfo fi(localTarget);
+    if (!fi.isAbsolute()) {
+        const QDir base(baseDir.isEmpty() ? QDir::currentPath() : baseDir);
+        fi = QFileInfo(base.filePath(localTarget));
+    }
+
+    const QString cleanAbs = QDir::cleanPath(fi.absoluteFilePath());
+    const QFileInfo cleanInfo(cleanAbs);
+    if (cleanInfo.isDir()) {
+        setFolderRoot(cleanAbs);
         m_folderDock->show();
         return;
     }
-    const QString absFile = fi.absoluteFilePath();
-    const QByteArray utf8 = absFile.toUtf8();
+
+    const QByteArray utf8 = cleanAbs.toUtf8();
     if (!kmark_session_open_file(m_session, utf8.constData())) {
         const QString err = takeFfiString(kmark_session_last_error_alloc(m_session));
         QMessageBox::warning(this, T("Failed to Open File", "Datei öffnen fehlgeschlagen"), err);
         return;
     }
-    recordRecentFile(absFile);
+    recordRecentFile(cleanAbs);
     m_viewport->clearImageCache();
     syncTabBar();
     syncOutlineTree();
+    syncUiState();
     m_viewport->notifyDocumentChanged();
+}
+
+void MainWindow::activateFromExternalInstance(
+    const QStringList& args,
+    const QString& workingDir,
+    const QString& xdgActivationToken
+) {
+    for (const QString& arg : args) {
+        openPathWithBaseDir(arg, workingDir);
+    }
+
+    if (!xdgActivationToken.isEmpty()) {
+        qputenv("XDG_ACTIVATION_TOKEN", xdgActivationToken.toUtf8());
+    }
+
+    setWindowState((windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+    show();
+    raise();
+    activateWindow();
+    if (m_viewport != nullptr) {
+        m_viewport->setFocus();
+    }
+}
+
+size_t MainWindow::tabCount() const {
+    return m_session != nullptr ? kmark_session_tab_count(m_session) : 0;
 }
 
 void MainWindow::openWelcomeGuideIfEmpty() {

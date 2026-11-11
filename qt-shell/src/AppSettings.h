@@ -88,6 +88,7 @@ struct AppSettings {
     bool showLineNumbers = false;
     bool focusMode = false;
     bool typewriterMode = false;
+    bool singleInstanceTabs = true;
 
     /* Workspace & Window state */
     QString lastFolderRoot;

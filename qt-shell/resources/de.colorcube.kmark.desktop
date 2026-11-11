@@ -14,3 +14,10 @@ Terminal=false
 Categories=Qt;KDE;Utility;TextEditor;
 MimeType=text/markdown;text/x-markdown;text/plain;
 StartupWMClass=kmark
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Name[de]=Neues Fenster
+Icon=window-new
+Exec=kmark --new-window %U

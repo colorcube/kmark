@@ -349,6 +349,7 @@ AppSettings AppSettings::load() {
     s.showLineNumbers = qs.value(QStringLiteral("showLineNumbers"), s.showLineNumbers).toBool();
     s.focusMode = qs.value(QStringLiteral("focusMode"), s.focusMode).toBool();
     s.typewriterMode = qs.value(QStringLiteral("typewriterMode"), s.typewriterMode).toBool();
+    s.singleInstanceTabs = qs.value(QStringLiteral("singleInstanceTabs"), s.singleInstanceTabs).toBool();
     qs.endGroup();
 
     qs.beginGroup(QStringLiteral("Workspace"));
@@ -433,6 +434,7 @@ void AppSettings::save() const {
     qs.setValue(QStringLiteral("showLineNumbers"), showLineNumbers);
     qs.setValue(QStringLiteral("focusMode"), focusMode);
     qs.setValue(QStringLiteral("typewriterMode"), typewriterMode);
+    qs.setValue(QStringLiteral("singleInstanceTabs"), singleInstanceTabs);
     qs.endGroup();
 
     qs.beginGroup(QStringLiteral("Workspace"));

@@ -42,8 +42,15 @@ public:
     ~MainWindow() override;
 
     void openPathFromCli(const QString& path);
+    void openPathWithBaseDir(const QString& rawPath, const QString& baseDir);
+    void activateFromExternalInstance(
+        const QStringList& args,
+        const QString& workingDir,
+        const QString& xdgActivationToken
+    );
     void openWelcomeGuideIfEmpty();
     size_t restoreCrashDrafts();
+    size_t tabCount() const;
     UiLang uiLanguage() const { return m_lang; }
 
 protected:

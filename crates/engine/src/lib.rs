@@ -483,4 +483,45 @@ mod tests {
         );
         assert_eq!(orphans[0].1.title, "PID Reused Draft");
     }
+
+    #[test]
+    fn open_file_replaces_untouched_welcome_guide_and_deduplicates_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("alpha.md");
+        let file_b = dir.path().join("beta.md");
+        std::fs::write(&file_a, "# Alpha\n").unwrap();
+        std::fs::write(&file_b, "# Beta\n").unwrap();
+
+        let mut session = Session::new_headless();
+        session.open_guide_tab();
+        assert_eq!(session.tab_count(), 1);
+        assert!(!session.active_doc().unwrap().rope.is_empty());
+
+        // First real file opened into an untouched Welcome Guide window replaces tab 0.
+        let idx_a = session.open_file(&file_a).unwrap();
+        assert_eq!(idx_a, 0);
+        assert_eq!(session.tab_count(), 1);
+        assert_eq!(session.active_doc().unwrap().title, "alpha.md");
+
+        // Second file opens as a second tab and becomes active.
+        let idx_b = session.open_file(&file_b).unwrap();
+        assert_eq!(idx_b, 1);
+        assert_eq!(session.tab_count(), 2);
+        assert_eq!(session.active_tab_index(), 1);
+        assert_eq!(session.active_doc().unwrap().title, "beta.md");
+
+        // Opening an already-open file focuses its existing tab without duplicating it.
+        let idx_a_again = session.open_file(&file_a).unwrap();
+        assert_eq!(idx_a_again, 0);
+        assert_eq!(session.tab_count(), 2);
+        assert_eq!(session.active_tab_index(), 0);
+
+        // If a Welcome Guide tab was edited by the user, opening a file must preserve it.
+        let mut dirty_guide_session = Session::new_headless();
+        dirty_guide_session.open_guide_tab();
+        dirty_guide_session.insert_text("Eigene Notiz\n");
+        let idx_after_dirty = dirty_guide_session.open_file(&file_a).unwrap();
+        assert_eq!(idx_after_dirty, 1);
+        assert_eq!(dirty_guide_session.tab_count(), 2);
+    }
 }

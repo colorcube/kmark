@@ -69,6 +69,7 @@ private:
     QCheckBox* m_chkLineNumbers = nullptr;
     QCheckBox* m_chkFocusMode = nullptr;
     QCheckBox* m_chkTypewriter = nullptr;
+    QCheckBox* m_chkSingleInstance = nullptr;
 
     /* Live Preview Widget */
     QWidget* m_previewCanvas = nullptr;

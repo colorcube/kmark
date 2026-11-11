@@ -13,7 +13,7 @@ option(KMARK_CARGO_OFFLINE "Pass --offline to Cargo (for sandboxed/offline build
 option(KMARK_BUILD_CLI "Build and install headless kmark-cli utility" ON)
 
 # 1. Qt6 (Required)
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Network)
 
 # 2. KDE Frameworks 6 (Optional — enables KXmlGuiWindow, KAboutData, standard KDE shortcuts/dialogs)
 find_package(KF6 6.0 QUIET COMPONENTS XmlGui ConfigWidgets CoreAddons I18n)
@@ -104,6 +104,7 @@ target_link_libraries(kmark PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::PrintSupport
+    Qt6::Network
     dl
     pthread
     m
