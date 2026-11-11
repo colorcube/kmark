@@ -967,12 +967,30 @@ pub extern "C" fn kmark_session_save_active_as(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kmark_session_flush_recovery(session: *const KMarkSession) {
-    let Some(s) = (unsafe { session.as_ref() }) else {
+pub extern "C" fn kmark_session_flush_recovery(session: *mut KMarkSession) {
+    let Some(s) = (unsafe { session.as_mut() }) else {
         return;
     };
     let _ = catch_unwind(AssertUnwindSafe(|| {
         s.session.flush_recovery_draft();
+    }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_recover_drafts(session: *mut KMarkSession) -> usize {
+    let Some(s) = (unsafe { session.as_mut() }) else {
+        return 0;
+    };
+    catch_unwind(AssertUnwindSafe(|| s.session.recover_crash_drafts())).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_clear_recovery(session: *mut KMarkSession) {
+    let Some(s) = (unsafe { session.as_mut() }) else {
+        return;
+    };
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        s.session.clear_all_recovery_drafts();
     }));
 }
 

@@ -43,6 +43,7 @@ public:
 
     void openPathFromCli(const QString& path);
     void openWelcomeGuideIfEmpty();
+    size_t restoreCrashDrafts();
     UiLang uiLanguage() const { return m_lang; }
 
 protected:

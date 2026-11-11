@@ -356,7 +356,9 @@ char* kmark_session_tab_path_alloc(const KMarkSession* session, size_t idx);
 bool kmark_session_open_file(KMarkSession* session, const char* path_utf8);
 bool kmark_session_save_active(KMarkSession* session);
 bool kmark_session_save_active_as(KMarkSession* session, const char* path_utf8);
-void kmark_session_flush_recovery(const KMarkSession* session);
+void kmark_session_flush_recovery(KMarkSession* session);
+size_t kmark_session_recover_drafts(KMarkSession* session);
+void kmark_session_clear_recovery(KMarkSession* session);
 char* kmark_session_last_error_alloc(const KMarkSession* session);
 
 /* Clipboard, HTML export & strings */

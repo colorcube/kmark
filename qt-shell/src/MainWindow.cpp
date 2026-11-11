@@ -664,6 +664,28 @@ void MainWindow::openWelcomeGuideIfEmpty() {
     }
 }
 
+size_t MainWindow::restoreCrashDrafts() {
+    if (m_session == nullptr) {
+        return 0;
+    }
+    const size_t recovered = kmark_session_recover_drafts(m_session);
+    if (recovered > 0) {
+        syncTabBar();
+        syncOutlineTree();
+        syncUiState();
+        m_viewport->notifyDocumentChanged();
+        statusBar()->showMessage(
+            T(
+                "Recovered %1 unsaved document(s) from a previous session.",
+                "%1 ungespeicherte(s) Dokument(e) aus einer früheren Sitzung wiederhergestellt."
+            )
+                .arg(recovered),
+            8000
+        );
+    }
+    return recovered;
+}
+
 void MainWindow::setupCentralArea() {
     auto* container = new QWidget(this);
     auto* layout = new QVBoxLayout(container);
@@ -1911,6 +1933,10 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             event->ignore();
             return;
         }
+    }
+    m_recoveryTimer.stop();
+    if (m_session != nullptr) {
+        kmark_session_clear_recovery(m_session);
     }
     syncSettingsFromRuntime(false);
     m_settings.lastFolderRoot = m_folderRootPath;

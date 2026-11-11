@@ -305,6 +305,9 @@ impl DocumentTab {
     }
 }
 
+/// Maximum automatic synchronous recovery draft size (4 MB) so huge files stay sub-millisecond.
+const MAX_RECOVERY_DRAFT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Multi-document editor session driving both the native KDE/Qt6 shell and `kmark-cli`.
 pub struct Session {
     tabs: Vec<DocumentTab>,
@@ -315,6 +318,7 @@ pub struct Session {
     pub layout_config: LayoutConfig,
     pub search: SearchState,
     pub recovery: RecoveryStore,
+    flushed_revisions: std::collections::HashMap<u64, u64>,
 }
 
 impl Default for Session {
@@ -335,6 +339,7 @@ impl Session {
             layout_config: LayoutConfig::default(),
             search: SearchState::default(),
             recovery: RecoveryStore::xdg_default(),
+            flushed_revisions: std::collections::HashMap::new(),
         };
         let _ = s.new_empty_tab();
         s
@@ -514,6 +519,7 @@ impl Session {
         write_file_atomic(&path, &content, tab.encoding, tab.line_ending)?;
         tab.saved_rope = tab.rope.clone();
         tab.saved_revision = Some(tab.revision);
+        self.flushed_revisions.remove(&tab.id);
         self.recovery.remove_draft(tab.id);
         Ok(())
     }
@@ -531,12 +537,14 @@ impl Session {
         tab.path = Some(target);
         tab.saved_rope = tab.rope.clone();
         tab.saved_revision = Some(tab.revision);
+        self.flushed_revisions.remove(&tab.id);
         self.recovery.remove_draft(tab.id);
         Ok(())
     }
 
     pub fn close_tab(&mut self, idx: usize) {
         if let Some(removed) = (idx < self.tabs.len()).then(|| self.tabs.remove(idx)) {
+            self.flushed_revisions.remove(&removed.id);
             self.recovery.remove_draft(removed.id);
         }
         if self.tabs.is_empty() {
@@ -648,30 +656,144 @@ impl Session {
         }
     }
 
-    /// Flushes recovery draft for the active tab if modified.
-    pub fn flush_recovery_draft(&self) {
-        let Some(tab) = self.active_doc() else {
-            return;
-        };
-        if !tab.is_dirty() {
-            self.recovery.remove_draft(tab.id);
-            return;
-        }
-        // Cap automatic synchronous draft snapshots at 4 MB so huge files stay instant.
-        if tab.rope.len_bytes() > 4 * 1024 * 1024 {
-            return;
-        }
+    /// Flushes recovery drafts for **all** dirty tabs (skipping unchanged revisions and files > 4 MB).
+    pub fn flush_recovery_draft(&mut self) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let draft = RecoveryDraft {
-            tab_id: tab.id,
-            original_path: tab.path.clone(),
-            title: tab.title.clone(),
-            content: tab.rope.to_string_lossless(),
-            timestamp_unix_secs: ts,
-        };
-        let _ = self.recovery.save_draft(&draft);
+
+        for tab in &self.tabs {
+            if !tab.is_dirty() {
+                if self.flushed_revisions.remove(&tab.id).is_some() {
+                    self.recovery.remove_draft(tab.id);
+                }
+                continue;
+            }
+            if tab.rope.len_bytes() > MAX_RECOVERY_DRAFT_BYTES {
+                continue;
+            }
+            if self.flushed_revisions.get(&tab.id) == Some(&tab.revision) {
+                continue;
+            }
+            let draft = RecoveryDraft {
+                tab_id: tab.id,
+                original_path: tab.path.clone(),
+                title: tab.title.clone(),
+                content: tab.rope.to_string_lossless(),
+                timestamp_unix_secs: ts,
+                cursor_byte: tab.selection.head,
+            };
+            if self.recovery.save_draft(&draft).is_ok() {
+                self.flushed_revisions.insert(tab.id, tab.revision);
+            }
+        }
+    }
+
+    /// Removes all recovery draft files belonging to the current session on clean exit.
+    pub fn clear_all_recovery_drafts(&mut self) {
+        self.flushed_revisions.clear();
+        self.recovery.clear_session_drafts();
+    }
+
+    /// Loads orphaned crash drafts from non-running KMark processes, restores them into dirty tabs,
+    /// re-saves them under the current session PID, and removes the stale orphan files.
+    pub fn recover_crash_drafts(&mut self) -> usize {
+        let orphans = self.recovery.load_orphaned_drafts();
+        if orphans.is_empty() {
+            return 0;
+        }
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut recovered_count = 0usize;
+
+        for (orphan_path, draft) in orphans {
+            let rope = Rope::from_str(&draft.content);
+            let mut saved_rope = Rope::new();
+            let mut encoding = TextEncoding::Utf8;
+            let mut line_ending = LineEnding::Lf;
+            let mut view_mode = self.layout_config.view_mode;
+
+            if let Some(ref orig_path) = draft.original_path {
+                if default_view_mode_for_path(orig_path) == ViewMode::PlainText {
+                    view_mode = ViewMode::PlainText;
+                }
+                if let Ok(decoded) = read_file_auto(orig_path) {
+                    saved_rope = Rope::from_str(&decoded.text);
+                    encoding = decoded.encoding;
+                    line_ending = decoded.line_ending;
+                    if rope == saved_rope {
+                        let _ = std::fs::remove_file(&orphan_path);
+                        continue;
+                    }
+                }
+            } else if rope.is_empty() {
+                let _ = std::fs::remove_file(&orphan_path);
+                continue;
+            }
+
+            let id = self.alloc_tab_id();
+            let sel = Selection::collapsed(draft.cursor_byte).clamp_to(&rope);
+            let mut tab = DocumentTab {
+                id,
+                path: draft.original_path.clone(),
+                title: draft.title,
+                saved_rope,
+                rope,
+                revision: 1,
+                saved_revision: None,
+                encoding,
+                line_ending,
+                view_mode,
+                selection: sel,
+                preferred_x: None,
+                scroll_y: 0.0,
+                armed_styles: Vec::new(),
+                ime_preedit: None,
+                history: DocumentHistory::default(),
+                blocks: Vec::new(),
+                outline: Vec::new(),
+                last_frame: None,
+                word_count: 0,
+                needs_scroll_to_caret: false,
+            };
+            tab.reparse();
+
+            // Adopt draft under current session PID before removing old dead-PID file.
+            let adopted = RecoveryDraft {
+                tab_id: id,
+                original_path: tab.path.clone(),
+                title: tab.title.clone(),
+                content: draft.content,
+                timestamp_unix_secs: ts,
+                cursor_byte: tab.selection.head,
+            };
+            if self.recovery.save_draft(&adopted).is_ok() {
+                self.flushed_revisions.insert(id, tab.revision);
+            }
+            let _ = std::fs::remove_file(&orphan_path);
+
+            if self.tabs.len() == 1
+                && let Some(first) = self.tabs.first()
+                && first.path.is_none()
+                && !first.is_dirty()
+                && first.rope.is_empty()
+            {
+                self.tabs[0] = tab;
+                self.active_tab = 0;
+            } else {
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len().saturating_sub(1);
+            }
+
+            recovered_count = recovered_count.saturating_add(1);
+        }
+
+        if recovered_count > 0 {
+            self.sync_search_for_active_tab();
+        }
+        recovered_count
     }
 
     fn sync_search_for_active_tab(&mut self) {

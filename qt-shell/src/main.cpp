@@ -85,6 +85,11 @@ int main(int argc, char* argv[]) {
 #endif
 
     kmark::MainWindow window(uiLang);
+    const bool isScreenshotMode =
+        parser.isSet(screenshotOpt) || parser.isSet(screenshotSettingsOpt);
+    if (!isScreenshotMode) {
+        window.restoreCrashDrafts();
+    }
     const QStringList args = parser.positionalArguments();
     if (args.isEmpty()) {
         window.openWelcomeGuideIfEmpty();

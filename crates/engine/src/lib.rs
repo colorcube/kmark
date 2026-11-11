@@ -331,4 +331,86 @@ mod tests {
             assert!(!session.active_doc().unwrap().is_dirty());
         }
     }
+
+    #[test]
+    fn crash_recovery_persists_all_dirty_tabs_restores_orphans_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec_dir = dir.path().join("recovery");
+        let existing_file = dir.path().join("article.md");
+        std::fs::write(&existing_file, "# Saved On Disk\n\nOriginal paragraph.\n").unwrap();
+
+        // Simulate Session A (crashed PID 999_999_991, guaranteed dead) with TWO dirty tabs:
+        // Tab 0: opened from `existing_file` with unsaved edits (and NOT the active tab at flush time!)
+        // Tab 1: untitled new tab with unsaved notes (active tab)
+        {
+            let mut crashed = Session::new_headless();
+            crashed.recovery = RecoveryStore::with_directory_and_pid(&rec_dir, 999_999_991);
+            crashed.open_file(&existing_file).unwrap();
+            crashed.jump_to_byte_offset(crashed.active_doc().unwrap().rope.len_bytes());
+            crashed.insert_text("\nUnsaved crash paragraph in file tab.\n");
+
+            crashed.new_empty_tab();
+            crashed.insert_text("# Scratch Idea\n\nUnsaved untitled tab.");
+
+            // Flush must persist BOTH dirty tabs, not only the active one!
+            crashed.flush_recovery_draft();
+            let draft_files: Vec<_> = std::fs::read_dir(&rec_dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .collect();
+            assert_eq!(
+                draft_files.len(),
+                2,
+                "both dirty tabs must be written to recovery store"
+            );
+            // Drop `crashed` WITHOUT calling `clear_all_recovery_drafts()` to simulate SIGKILL/crash.
+        }
+
+        // Simulate Session B starting up afterwards:
+        let mut restarted = Session::new_headless();
+        restarted.recovery = RecoveryStore::with_directory_and_pid(&rec_dir, std::process::id());
+        let recovered = restarted.recover_crash_drafts();
+        assert_eq!(recovered, 2);
+        assert_eq!(restarted.tab_count(), 2);
+
+        // Both restored tabs are marked dirty, keep their paths/titles/contents, and dead-PID files are gone!
+        restarted.set_active_tab(0);
+        let t0 = restarted.active_doc().unwrap();
+        assert!(t0.is_dirty());
+        assert_eq!(
+            t0.path.as_deref(),
+            Some(std::fs::canonicalize(&existing_file).unwrap().as_path())
+        );
+        assert!(
+            t0.rope
+                .to_string_lossless()
+                .contains("Unsaved crash paragraph")
+        );
+
+        restarted.set_active_tab(1);
+        let t1 = restarted.active_doc().unwrap();
+        assert!(t1.is_dirty());
+        assert!(t1.path.is_none());
+        assert_eq!(
+            t1.rope.to_string_lossless(),
+            "# Scratch Idea\n\nUnsaved untitled tab."
+        );
+
+        // Saving Tab 0 writes to the original file and removes its draft; clean shutdown removes remaining drafts.
+        restarted.set_active_tab(0);
+        restarted.save_active_tab().unwrap();
+        assert!(
+            std::fs::read_to_string(&existing_file)
+                .unwrap()
+                .contains("Unsaved crash paragraph")
+        );
+
+        restarted.clear_all_recovery_drafts();
+        let leftover: Vec<_> = std::fs::read_dir(&rec_dir).unwrap().flatten().collect();
+        assert!(
+            leftover.is_empty(),
+            "recovery directory must be empty after clean shutdown"
+        );
+    }
 }
