@@ -128,11 +128,38 @@ impl PartialEq for Rope {
         if self.summary() != other.summary() {
             return false;
         }
-        self.to_string_lossless() == other.to_string_lossless()
+        common_prefix_bytes(&self.root, &other.root) == self.len_bytes()
     }
 }
 
 impl Eq for Rope {}
+
+/// Streaming iterator over non-empty UTF-8 leaf slices in a [`Rope`] (zero String allocations).
+pub struct Chunks<'a> {
+    stack: Vec<&'a Arc<Node>>,
+}
+
+impl<'a> Iterator for Chunks<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(node) = self.stack.pop() {
+            match node.as_ref() {
+                Node::Leaf { text, .. } => {
+                    if !text.is_empty() {
+                        return Some(text.as_str());
+                    }
+                }
+                Node::Internal { children, .. } => {
+                    for child in children.iter().rev() {
+                        self.stack.push(child);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
 
 impl Rope {
     #[must_use]
@@ -152,6 +179,52 @@ impl Rope {
         Self {
             root: build_tree_from_nodes(leaves),
         }
+    }
+
+    /// Returns `true` if `self` and `other` share the exact same root B-tree node (`O(1)`).
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.root, &other.root)
+    }
+
+    /// Iterates over leaf `&str` chunks from start to end without heap allocations.
+    #[must_use]
+    pub fn chunks(&self) -> Chunks<'_> {
+        Chunks {
+            stack: vec![&self.root],
+        }
+    }
+
+    /// Computes the minimal UTF-8-aligned changed window `(old_range, new_range)` turning `self`
+    /// into `other`, skipping shared Copy-on-Write B-tree subtrees in `O(log N)`.
+    ///
+    /// Returns `None` if `self` and `other` contain identical text.
+    #[must_use]
+    pub fn diff_byte_range(&self, other: &Self) -> Option<(Range<usize>, Range<usize>)> {
+        if Arc::ptr_eq(&self.root, &other.root) {
+            return None;
+        }
+        let old_len = self.len_bytes();
+        let new_len = other.len_bytes();
+        let raw_prefix = common_prefix_bytes(&self.root, &other.root);
+        if raw_prefix == old_len && raw_prefix == new_len {
+            return None;
+        }
+
+        let start = self.clamp_char_boundary(raw_prefix);
+        let max_suffix = old_len.min(new_len).saturating_sub(start);
+        let mut raw_suffix = common_suffix_bytes(&self.root, &other.root, max_suffix);
+
+        while raw_suffix > 0
+            && (!self.is_char_boundary(old_len.saturating_sub(raw_suffix))
+                || !other.is_char_boundary(new_len.saturating_sub(raw_suffix)))
+        {
+            raw_suffix = raw_suffix.saturating_sub(1);
+        }
+
+        let old_end = old_len.saturating_sub(raw_suffix).max(start);
+        let new_end = new_len.saturating_sub(raw_suffix).max(start);
+        Some((start..old_end, start..new_end))
     }
 
     #[must_use]
@@ -491,10 +564,81 @@ fn split_str_into_leaves(mut remaining: &str) -> Vec<Arc<Node>> {
     leaves
 }
 
+fn coalesce_underfull_nodes(nodes: Vec<Arc<Node>>) -> Vec<Arc<Node>> {
+    if nodes.len() <= 1 {
+        return nodes;
+    }
+    let level_height = nodes.first().map_or(0, |n| n.height());
+    if level_height == 0 {
+        let mut merged: Vec<Arc<Node>> = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            if node.summary().bytes == 0 {
+                continue;
+            }
+            if let (Some(prev), Node::Leaf { text: rt, .. }) =
+                (merged.last().cloned(), node.as_ref())
+                && let Node::Leaf { text: lt, .. } = prev.as_ref()
+                && (lt.len() < MIN_LEAF_BYTES || rt.len() < MIN_LEAF_BYTES)
+                && lt.len().saturating_add(rt.len()) <= MAX_LEAF_BYTES
+            {
+                let mut combined = String::with_capacity(lt.len().saturating_add(rt.len()));
+                combined.push_str(lt);
+                combined.push_str(rt);
+                let last_idx = merged.len().saturating_sub(1);
+                merged[last_idx] = Node::leaf(combined);
+                continue;
+            }
+            merged.push(node);
+        }
+        if merged.is_empty() {
+            merged.push(Node::leaf(String::new()));
+        }
+        return merged;
+    }
+
+    // Internal nodes of uniform height >= 1: merge underfull (< MIN_CHILDREN) siblings with a neighbor.
+    let mut out: Vec<Arc<Node>> = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let curr_len = match node.as_ref() {
+            Node::Internal { children, .. } => children.len(),
+            Node::Leaf { .. } => 1,
+        };
+        if let Some(prev) = out.last().cloned()
+            && let (
+                Node::Internal {
+                    children: prev_ch, ..
+                },
+                Node::Internal {
+                    children: curr_ch, ..
+                },
+            ) = (prev.as_ref(), node.as_ref())
+            && (prev_ch.len() < MIN_CHILDREN || curr_len < MIN_CHILDREN)
+        {
+            let total = prev_ch.len().saturating_add(curr_ch.len());
+            let mut combined = Vec::with_capacity(total);
+            combined.extend(prev_ch.iter().cloned());
+            combined.extend(curr_ch.iter().cloned());
+            out.pop();
+            if total <= MAX_CHILDREN {
+                out.push(Node::internal(combined));
+            } else {
+                let mid = total / 2;
+                let right = combined.split_off(mid);
+                out.push(Node::internal(combined));
+                out.push(Node::internal(right));
+            }
+            continue;
+        }
+        out.push(node);
+    }
+    out
+}
+
 fn build_tree_from_nodes(mut nodes: Vec<Arc<Node>>) -> Arc<Node> {
     if nodes.is_empty() {
         return Node::leaf(String::new());
     }
+    nodes = coalesce_underfull_nodes(nodes);
     while nodes.len() > 1 {
         let mut next_level = Vec::with_capacity(nodes.len().div_ceil(MAX_CHILDREN));
         let mut idx = 0usize;
@@ -514,7 +658,7 @@ fn build_tree_from_nodes(mut nodes: Vec<Arc<Node>>) -> Arc<Node> {
             next_level.push(Node::internal(chunk));
             idx = idx.saturating_add(take);
         }
-        nodes = next_level;
+        nodes = coalesce_underfull_nodes(next_level);
     }
     nodes
         .into_iter()
@@ -810,4 +954,233 @@ fn concat_trees(left: Arc<Node>, right: Arc<Node>) -> Arc<Node> {
         return build_tree_from_nodes(all);
     }
     Node::internal(vec![left, right])
+}
+
+fn next_non_empty_leaf_forward<'a>(stack: &mut Vec<&'a Arc<Node>>) -> Option<&'a [u8]> {
+    while let Some(node) = stack.pop() {
+        match node.as_ref() {
+            Node::Leaf { text, .. } => {
+                if !text.is_empty() {
+                    return Some(text.as_bytes());
+                }
+            }
+            Node::Internal { children, .. } => {
+                for child in children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn next_non_empty_leaf_backward<'a>(stack: &mut Vec<&'a Arc<Node>>) -> Option<&'a [u8]> {
+    while let Some(node) = stack.pop() {
+        match node.as_ref() {
+            Node::Leaf { text, .. } => {
+                if !text.is_empty() {
+                    return Some(text.as_bytes());
+                }
+            }
+            Node::Internal { children, .. } => {
+                for child in children {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn common_prefix_bytes(a: &Arc<Node>, b: &Arc<Node>) -> usize {
+    let mut a_stack: Vec<&Arc<Node>> = vec![a];
+    let mut b_stack: Vec<&Arc<Node>> = vec![b];
+    let mut a_leaf: &[u8] = &[];
+    let mut b_leaf: &[u8] = &[];
+    let mut prefix = 0usize;
+
+    loop {
+        if a_leaf.is_empty() && b_leaf.is_empty() {
+            while a_stack.last().is_some_and(|n| n.summary().bytes == 0) {
+                a_stack.pop();
+            }
+            while b_stack.last().is_some_and(|n| n.summary().bytes == 0) {
+                b_stack.pop();
+            }
+            let (Some(&na), Some(&nb)) = (a_stack.last(), b_stack.last()) else {
+                break;
+            };
+            if Arc::ptr_eq(na, nb) {
+                prefix = prefix.saturating_add(na.summary().bytes);
+                a_stack.pop();
+                b_stack.pop();
+                continue;
+            }
+            if na.height() > nb.height() {
+                a_stack.pop();
+                if let Node::Internal { children, .. } = na.as_ref() {
+                    for child in children.iter().rev() {
+                        a_stack.push(child);
+                    }
+                }
+                continue;
+            }
+            if nb.height() > na.height() {
+                b_stack.pop();
+                if let Node::Internal { children, .. } = nb.as_ref() {
+                    for child in children.iter().rev() {
+                        b_stack.push(child);
+                    }
+                }
+                continue;
+            }
+            if na.height() > 0 {
+                a_stack.pop();
+                b_stack.pop();
+                if let Node::Internal { children, .. } = na.as_ref() {
+                    for child in children.iter().rev() {
+                        a_stack.push(child);
+                    }
+                }
+                if let Node::Internal { children, .. } = nb.as_ref() {
+                    for child in children.iter().rev() {
+                        b_stack.push(child);
+                    }
+                }
+                continue;
+            }
+        }
+
+        if a_leaf.is_empty() {
+            let Some(next) = next_non_empty_leaf_forward(&mut a_stack) else {
+                break;
+            };
+            a_leaf = next;
+        }
+        if b_leaf.is_empty() {
+            let Some(next) = next_non_empty_leaf_forward(&mut b_stack) else {
+                break;
+            };
+            b_leaf = next;
+        }
+
+        let n = a_leaf.len().min(b_leaf.len());
+        if a_leaf[..n] == b_leaf[..n] {
+            prefix = prefix.saturating_add(n);
+            a_leaf = &a_leaf[n..];
+            b_leaf = &b_leaf[n..];
+        } else {
+            let mismatch = a_leaf[..n]
+                .iter()
+                .zip(&b_leaf[..n])
+                .position(|(x, y)| x != y)
+                .unwrap_or(0);
+            return prefix.saturating_add(mismatch);
+        }
+    }
+
+    prefix
+}
+
+fn common_suffix_bytes(a: &Arc<Node>, b: &Arc<Node>, max_suffix: usize) -> usize {
+    if max_suffix == 0 {
+        return 0;
+    }
+    let mut a_stack: Vec<&Arc<Node>> = vec![a];
+    let mut b_stack: Vec<&Arc<Node>> = vec![b];
+    let mut a_leaf: &[u8] = &[];
+    let mut b_leaf: &[u8] = &[];
+    let mut suffix = 0usize;
+
+    loop {
+        let rem = max_suffix.saturating_sub(suffix);
+        if rem == 0 {
+            break;
+        }
+
+        if a_leaf.is_empty() && b_leaf.is_empty() {
+            while a_stack.last().is_some_and(|n| n.summary().bytes == 0) {
+                a_stack.pop();
+            }
+            while b_stack.last().is_some_and(|n| n.summary().bytes == 0) {
+                b_stack.pop();
+            }
+            let (Some(&na), Some(&nb)) = (a_stack.last(), b_stack.last()) else {
+                break;
+            };
+            if Arc::ptr_eq(na, nb) && na.summary().bytes <= rem {
+                suffix = suffix.saturating_add(na.summary().bytes);
+                a_stack.pop();
+                b_stack.pop();
+                continue;
+            }
+            if na.height() > nb.height() {
+                a_stack.pop();
+                if let Node::Internal { children, .. } = na.as_ref() {
+                    for child in children {
+                        a_stack.push(child);
+                    }
+                }
+                continue;
+            }
+            if nb.height() > na.height() {
+                b_stack.pop();
+                if let Node::Internal { children, .. } = nb.as_ref() {
+                    for child in children {
+                        b_stack.push(child);
+                    }
+                }
+                continue;
+            }
+            if na.height() > 0 {
+                a_stack.pop();
+                b_stack.pop();
+                if let Node::Internal { children, .. } = na.as_ref() {
+                    for child in children {
+                        a_stack.push(child);
+                    }
+                }
+                if let Node::Internal { children, .. } = nb.as_ref() {
+                    for child in children {
+                        b_stack.push(child);
+                    }
+                }
+                continue;
+            }
+        }
+
+        if a_leaf.is_empty() {
+            let Some(next) = next_non_empty_leaf_backward(&mut a_stack) else {
+                break;
+            };
+            a_leaf = next;
+        }
+        if b_leaf.is_empty() {
+            let Some(next) = next_non_empty_leaf_backward(&mut b_stack) else {
+                break;
+            };
+            b_leaf = next;
+        }
+
+        let n = a_leaf.len().min(b_leaf.len()).min(rem);
+        let a_start = a_leaf.len().saturating_sub(n);
+        let b_start = b_leaf.len().saturating_sub(n);
+        let a_tail = &a_leaf[a_start..];
+        let b_tail = &b_leaf[b_start..];
+        if a_tail == b_tail {
+            suffix = suffix.saturating_add(n);
+            a_leaf = &a_leaf[..a_start];
+            b_leaf = &b_leaf[..b_start];
+        } else {
+            let mismatch = a_tail
+                .iter()
+                .rev()
+                .zip(b_tail.iter().rev())
+                .position(|(x, y)| x != y)
+                .unwrap_or(0);
+            return suffix.saturating_add(mismatch);
+        }
+    }
+
+    suffix
 }

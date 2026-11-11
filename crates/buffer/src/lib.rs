@@ -7,7 +7,7 @@ pub mod rope;
 
 pub use encoding::{DecodedDocument, IoError, LineEnding, TextEncoding};
 pub use history::{DocumentHistory, EditGroup, Selection};
-pub use rope::{LineCol, Rope, Summary};
+pub use rope::{Chunks, LineCol, Rope, Summary};
 
 #[cfg(test)]
 mod tests {
@@ -204,5 +204,42 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(fs::read_to_string(&new_target).unwrap(), "created!\n");
+    }
+
+    #[test]
+    fn rope_diff_byte_range_and_streaming_equality() {
+        let mut base = String::new();
+        for i in 0..400 {
+            base.push_str(&format!("Paragraph {i} with UTF-8 äöü € 🚀.\n\n"));
+        }
+        let r1 = Rope::from_str(&base);
+        let r1_clone = r1.clone();
+        assert!(r1.ptr_eq(&r1_clone));
+        assert_eq!(r1.diff_byte_range(&r1_clone), None);
+
+        // Separately allocated Rope with identical text compares equal and diffs as None.
+        let r2 = Rope::from_str(&base);
+        assert!(!r1.ptr_eq(&r2));
+        assert_eq!(r1, r2);
+        assert_eq!(r1.diff_byte_range(&r2), None);
+
+        // Chunks concatenate back to exact source string.
+        let joined: String = r1.chunks().collect();
+        assert_eq!(joined, base);
+
+        // Multi-byte trailing-continuation-byte edge case: 'ä' (C3 A4) vs '¤' (C2 A4)
+        let ra = Rope::from_str("prefix ä suffix");
+        let rb = Rope::from_str("prefix ¤ suffix");
+        let (old_r, new_r) = ra.diff_byte_range(&rb).unwrap();
+        assert!(ra.is_char_boundary(old_r.start) && ra.is_char_boundary(old_r.end));
+        assert!(rb.is_char_boundary(new_r.start) && rb.is_char_boundary(new_r.end));
+        assert_eq!(ra.slice_to_string(old_r), "ä");
+        assert_eq!(rb.slice_to_string(new_r), "¤");
+
+        // Repetitive text insertion ("aaaa" -> "aaaaa") never overlaps prefix and suffix.
+        let rep_old = Rope::from_str("aaaa");
+        let rep_new = Rope::from_str("aaaaa");
+        let (ro, rn) = rep_old.diff_byte_range(&rep_new).unwrap();
+        assert_eq!(ro.len() + 1, rn.len());
     }
 }

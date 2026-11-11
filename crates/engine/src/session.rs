@@ -13,7 +13,7 @@ use kmark_layout::{
 use kmark_syntax::{
     AlertKind, Block, BlockKind, ColumnAlign, ImageSize, InlineTokenKind, OutlineEntry, StyleFlags,
     active_styles_at, export_html_document, extract_outline, parse_blocks, parse_inline_tokens,
-    reparse_incremental,
+    reparse_changed_rope,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -131,6 +131,8 @@ pub struct DocumentTab {
     pub title: String,
     pub rope: Rope,
     pub saved_rope: Rope,
+    pub revision: u64,
+    pub saved_revision: Option<u64>,
     pub encoding: TextEncoding,
     pub line_ending: LineEnding,
     pub view_mode: ViewMode,
@@ -145,6 +147,22 @@ pub struct DocumentTab {
     pub last_frame: Option<ViewportFrame>,
     pub word_count: usize,
     pub needs_scroll_to_caret: bool,
+}
+
+/// Maximum document byte size for full initial word-count scans (`reparse`).
+const MAX_FULL_WORD_COUNT_BYTES: usize = 2 * 1024 * 1024;
+
+fn count_words_in_lines(rope: &Rope, line_range: Range<usize>) -> usize {
+    let end = line_range.end.min(rope.line_count());
+    let start = line_range.start.min(end);
+    if start >= end {
+        return 0;
+    }
+    let byte_start = rope.line_start_byte(start);
+    let byte_end = rope.line_full_byte_range(end.saturating_sub(1)).end;
+    rope.slice_to_string(byte_start..byte_end)
+        .unicode_words()
+        .count()
 }
 
 impl DocumentTab {
@@ -162,6 +180,8 @@ impl DocumentTab {
             title: lang.untitled_title(index_num),
             saved_rope: rope.clone(),
             rope,
+            revision: 0,
+            saved_revision: Some(0),
             encoding: TextEncoding::Utf8,
             line_ending: LineEnding::Lf,
             view_mode: ViewMode::Wysiwyg,
@@ -190,6 +210,8 @@ impl DocumentTab {
             title: title.into(),
             saved_rope: rope.clone(),
             rope,
+            revision: 0,
+            saved_revision: Some(0),
             encoding: TextEncoding::Utf8,
             line_ending: LineEnding::Lf,
             view_mode: ViewMode::Wysiwyg,
@@ -213,8 +235,7 @@ impl DocumentTab {
         self.selection = self.selection.clamp_to(&self.rope);
         self.blocks = parse_blocks(&self.rope);
         self.outline = extract_outline(&self.rope, &self.blocks);
-        // Fast word count for status bar (skip exhaustive scan above 2 MB to keep typing sub-ms).
-        if self.rope.len_bytes() <= 2 * 1024 * 1024 {
+        if self.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
             let text = self.rope.to_string_lossless();
             self.word_count = text.unicode_words().count();
         }
@@ -222,6 +243,9 @@ impl DocumentTab {
 
     #[must_use]
     pub fn is_dirty(&self) -> bool {
+        if self.saved_revision == Some(self.revision) || self.rope.ptr_eq(&self.saved_rope) {
+            return false;
+        }
         self.rope != self.saved_rope
     }
 
@@ -241,39 +265,39 @@ impl DocumentTab {
 
     pub fn commit_edit(&mut self, next_rope: Rope, next_sel: Selection, group: EditGroup) {
         let clamped_sel = next_sel.clamp_to(&next_rope);
-        if self.rope == next_rope && self.selection == clamped_sel {
+        let diff = self.rope.diff_byte_range(&next_rope);
+        if diff.is_none() && self.selection == clamped_sel {
             return;
         }
         let before_r = self.rope.clone();
         let before_s = self.selection;
-        let hint = before_s.start();
         self.rope = next_rope;
         self.selection = clamped_sel;
         self.preferred_x = None;
         self.needs_scroll_to_caret = true;
 
-        reparse_incremental(&before_r, &self.rope, &mut self.blocks, hint);
-        if self.blocks.len() <= 2_000 {
+        if let Some((old_range, new_range)) = diff {
+            self.revision = self.revision.wrapping_add(1);
+            reparse_changed_rope(&before_r, &self.rope, &mut self.blocks);
             self.outline = extract_outline(&self.rope, &self.blocks);
-        } else {
-            // Large documents: refresh outline only when a heading line may have changed
-            let lc_old = before_r.byte_to_line_col(hint);
-            let lc_new = self.rope.byte_to_line_col(self.selection.head);
-            if before_r.line_text(lc_old.line).starts_with('#')
-                || self.rope.line_text(lc_new.line).starts_with('#')
-                || before_r.line_count() != self.rope.line_count()
-            {
-                self.outline = extract_outline(&self.rope, &self.blocks);
-            }
-        }
 
-        if self.rope.len_bytes() <= 128 * 1024 {
-            self.word_count = self.rope.to_string_lossless().unicode_words().count();
-        } else if before_r.line_count() == self.rope.line_count() {
-            let line_idx = before_r.byte_to_line_col(hint).line;
-            let old_w = before_r.line_text(line_idx).unicode_words().count();
-            let new_w = self.rope.line_text(line_idx).unicode_words().count();
-            self.word_count = self.word_count.saturating_sub(old_w).saturating_add(new_w);
+            let old_line_start = before_r.byte_to_line_col(old_range.start).line;
+            let old_line_end = before_r
+                .byte_to_line_col(old_range.end)
+                .line
+                .saturating_add(1);
+            let new_line_start = self.rope.byte_to_line_col(new_range.start).line;
+            let new_line_end = self
+                .rope
+                .byte_to_line_col(new_range.end)
+                .line
+                .saturating_add(1);
+            let old_words = count_words_in_lines(&before_r, old_line_start..old_line_end);
+            let new_words = count_words_in_lines(&self.rope, new_line_start..new_line_end);
+            self.word_count = self
+                .word_count
+                .saturating_sub(old_words)
+                .saturating_add(new_words);
         }
 
         self.history
@@ -440,6 +464,8 @@ impl Session {
             title,
             saved_rope: rope.clone(),
             rope,
+            revision: 0,
+            saved_revision: Some(0),
             encoding: decoded.encoding,
             line_ending: decoded.line_ending,
             view_mode,
@@ -487,6 +513,7 @@ impl Session {
         let content = tab.rope.to_string_lossless();
         write_file_atomic(&path, &content, tab.encoding, tab.line_ending)?;
         tab.saved_rope = tab.rope.clone();
+        tab.saved_revision = Some(tab.revision);
         self.recovery.remove_draft(tab.id);
         Ok(())
     }
@@ -503,6 +530,7 @@ impl Session {
         }
         tab.path = Some(target);
         tab.saved_rope = tab.rope.clone();
+        tab.saved_revision = Some(tab.revision);
         self.recovery.remove_draft(tab.id);
         Ok(())
     }
@@ -779,19 +807,29 @@ impl Session {
             Command::Undo => {
                 tab.armed_styles.clear();
                 if let Some((prev_rope, prev_sel)) = tab.history.undo() {
-                    tab.rope = prev_rope;
+                    let old_r = std::mem::replace(&mut tab.rope, prev_rope);
+                    tab.revision = tab.revision.wrapping_add(1);
                     tab.selection = prev_sel.clamp_to(&tab.rope);
                     tab.needs_scroll_to_caret = true;
-                    tab.reparse();
+                    reparse_changed_rope(&old_r, &tab.rope, &mut tab.blocks);
+                    tab.outline = extract_outline(&tab.rope, &tab.blocks);
+                    if tab.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
+                        tab.word_count = tab.rope.to_string_lossless().unicode_words().count();
+                    }
                 }
             }
             Command::Redo => {
                 tab.armed_styles.clear();
                 if let Some((next_rope, next_sel)) = tab.history.redo() {
-                    tab.rope = next_rope;
+                    let old_r = std::mem::replace(&mut tab.rope, next_rope);
+                    tab.revision = tab.revision.wrapping_add(1);
                     tab.selection = next_sel.clamp_to(&tab.rope);
                     tab.needs_scroll_to_caret = true;
-                    tab.reparse();
+                    reparse_changed_rope(&old_r, &tab.rope, &mut tab.blocks);
+                    tab.outline = extract_outline(&tab.rope, &tab.blocks);
+                    if tab.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
+                        tab.word_count = tab.rope.to_string_lossless().unicode_words().count();
+                    }
                 }
             }
             Command::SelectAll => {

@@ -948,17 +948,37 @@ impl Block {
     }
 }
 
-/// Incrementally updates `blocks` after `old_rope` becomes `new_rope` around `edit_hint_byte`.
+/// Minimum document line count before incremental window reparsing is used instead of full parse.
+const MIN_INCREMENTAL_PARSE_LINES: usize = 300;
+
+/// Maximum changed span size (bytes) eligible for single-window incremental reparsing.
+const MAX_INCREMENTAL_WINDOW_BYTES: usize = 16_384;
+
+/// Maximum window line span eligible for incremental reparsing before falling back to full parse.
+const MAX_INCREMENTAL_WINDOW_LINES: usize = 512;
+
+/// Incrementally updates `blocks` after `old_rope` becomes `new_rope` by computing the exact
+/// changed byte span via [`Rope::diff_byte_range`].
 ///
-/// Re-parses only the blank-line-bounded neighborhood around the edit (`O(log N)` on large files),
-/// falling back to full [`parse_blocks`] when code fences or large multi-screen edits occur.
-pub fn reparse_incremental(
-    old_rope: &Rope,
-    new_rope: &Rope,
-    blocks: &mut Vec<Block>,
-    edit_hint_byte: usize,
-) {
-    if blocks.is_empty() || new_rope.line_count() <= 300 {
+/// Handles both single-caret typing (`O(log N)`) and multi-site edits such as *Replace All*:
+/// - Every modified line between the first and last changed byte lies strictly inside the
+///   reparsed blank-line-bounded window.
+/// - Blocks after the untouched trailing `BlankLines` wall are shifted by exact `(byte_delta, line_delta)`.
+/// - Falls back to full [`parse_blocks`] when code fences are involved or when a scattered edit
+///   spans more than [`MAX_INCREMENTAL_WINDOW_LINES`] lines / [`MAX_INCREMENTAL_WINDOW_BYTES`] bytes.
+pub fn reparse_changed_rope(old_rope: &Rope, new_rope: &Rope, blocks: &mut Vec<Block>) {
+    if blocks.is_empty() || new_rope.line_count() <= MIN_INCREMENTAL_PARSE_LINES {
+        *blocks = parse_blocks(new_rope);
+        return;
+    }
+
+    let Some((old_edit_range, new_edit_range)) = old_rope.diff_byte_range(new_rope) else {
+        return;
+    };
+
+    if old_edit_range.len() > MAX_INCREMENTAL_WINDOW_BYTES
+        || new_edit_range.len() > MAX_INCREMENTAL_WINDOW_BYTES
+    {
         *blocks = parse_blocks(new_rope);
         return;
     }
@@ -982,38 +1002,45 @@ pub fn reparse_incremental(
 
     let byte_delta = new_b.wrapping_sub(old_b);
     let line_delta = new_l.wrapping_sub(old_l);
-    if byte_delta.unsigned_abs() > 4096 || line_delta.unsigned_abs() > 64 {
-        *blocks = parse_blocks(new_rope);
-        return;
-    }
 
-    // Locate block containing `edit_hint_byte`
-    let center = blocks
-        .binary_search_by(|blk| {
-            if edit_hint_byte < blk.byte_range.start {
-                std::cmp::Ordering::Greater
-            } else if edit_hint_byte > blk.byte_range.end {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .unwrap_or_else(|ins| ins.min(blocks.len().saturating_sub(1)));
+    let old_start_line = old_rope.byte_to_line_col(old_edit_range.start).line;
+    let old_end_line = old_rope.byte_to_line_col(old_edit_range.end).line;
+    let safe_before_line = old_start_line.saturating_sub(1);
+    let safe_after_line = (old_end_line.saturating_add(2)).min(old_rope.line_count());
 
-    // Expand outward to nearest `BlankLines` walls so multi-line blocks (tables, quotes, paragraphs) stay intact.
-    let mut first_idx = center.saturating_sub(1);
-    while first_idx > 0 && !matches!(blocks[first_idx].kind, BlockKind::BlankLines) {
+    // Expand backward until `first_idx == 0` or `blocks[first_idx]` is a completely untouched `BlankLines` wall.
+    let mut first_idx = blocks
+        .partition_point(|b| b.line_range.end <= safe_before_line)
+        .min(blocks.len().saturating_sub(1));
+    while first_idx > 0
+        && !(matches!(blocks[first_idx].kind, BlockKind::BlankLines)
+            && blocks[first_idx].line_range.end <= safe_before_line)
+    {
         first_idx = first_idx.saturating_sub(1);
     }
 
-    let mut end_idx = (center.saturating_add(2)).min(blocks.len());
+    // Expand forward until `end_idx == blocks.len()` or `blocks[end_idx - 1]` is an untouched `BlankLines` wall.
+    let mut end_idx = blocks
+        .partition_point(|b| b.line_range.start < safe_after_line)
+        .max(first_idx.saturating_add(1))
+        .min(blocks.len());
     while end_idx < blocks.len()
-        && !matches!(
+        && !(matches!(
             blocks[end_idx.saturating_sub(1)].kind,
             BlockKind::BlankLines
-        )
+        ) && blocks[end_idx.saturating_sub(1)].line_range.start >= safe_after_line)
     {
         end_idx = end_idx.saturating_add(1);
+    }
+
+    let win_line_start = blocks[first_idx].line_range.start;
+    let old_win_line_end = blocks[end_idx.saturating_sub(1)].line_range.end;
+    let new_win_line_end = shift_usize(old_win_line_end, line_delta).min(new_rope.line_count());
+    if new_win_line_end < win_line_start
+        || new_win_line_end.saturating_sub(win_line_start) > MAX_INCREMENTAL_WINDOW_LINES
+    {
+        *blocks = parse_blocks(new_rope);
+        return;
     }
 
     // If old window contains a CodeFence, fall back to full parse in case fences were opened/closed.
@@ -1021,14 +1048,6 @@ pub fn reparse_incremental(
         .iter()
         .any(|b| matches!(b.kind, BlockKind::CodeFence { .. }))
     {
-        *blocks = parse_blocks(new_rope);
-        return;
-    }
-
-    let win_line_start = blocks[first_idx].line_range.start;
-    let old_win_line_end = blocks[end_idx.saturating_sub(1)].line_range.end;
-    let new_win_line_end = shift_usize(old_win_line_end, line_delta).min(new_rope.line_count());
-    if new_win_line_end < win_line_start {
         *blocks = parse_blocks(new_rope);
         return;
     }
@@ -1046,4 +1065,17 @@ pub fn reparse_incremental(
         tail_blk.shift_offsets(byte_delta, line_delta);
     }
     blocks.splice(first_idx..end_idx, replacement);
+}
+
+/// Incrementally updates `blocks` after `old_rope` becomes `new_rope`.
+///
+/// Kept for API compatibility; ignores `_edit_hint_byte` in favor of [`reparse_changed_rope`]'s
+/// exact B-tree diff window so multi-site edits cannot go out of sync.
+pub fn reparse_incremental(
+    old_rope: &Rope,
+    new_rope: &Rope,
+    blocks: &mut Vec<Block>,
+    _edit_hint_byte: usize,
+) {
+    reparse_changed_rope(old_rope, new_rope, blocks);
 }

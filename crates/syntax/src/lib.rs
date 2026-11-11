@@ -10,7 +10,7 @@ pub use blocks::{
     AlertKind, Block, BlockKind, ColumnAlign, QuoteLine, TableBlock, TableCell, TableRow,
     TaskState, is_blank, looks_like_table_row, parse_atx_heading, parse_blockquote_prefix,
     parse_blocks, parse_blocks_in_line_range, parse_table_delimiter, parse_table_row,
-    reparse_incremental,
+    reparse_changed_rope, reparse_incremental,
 };
 pub use html::export_html_document;
 pub use inline::{

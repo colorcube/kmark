@@ -201,6 +201,7 @@ fn cmd_bench() {
     if let Some(tab) = session.active_doc_mut() {
         tab.rope = rope.clone();
         tab.saved_rope = rope.clone();
+        tab.saved_revision = Some(tab.revision);
         tab.blocks = blocks;
         tab.outline = outline;
     }

@@ -267,4 +267,68 @@ mod tests {
             "> [!WARNING] Wichtiges Detail\n> Zweite Zeile."
         );
     }
+
+    #[test]
+    fn replace_all_across_400_paragraphs_keeps_blocks_outline_and_tables_exact() {
+        for target_indices in [[5usize, 130, 260, 385], [50usize, 80, 110, 140]] {
+            let mut md = String::new();
+            for i in 0..400 {
+                if target_indices.contains(&i) {
+                    md.push_str(&format!("TODO Abschnitt {i}\n\n"));
+                } else {
+                    md.push_str(&format!(
+                        "Absatz Nummer {i} mit normalem Fließtext ohne Treffer.\n\n"
+                    ));
+                }
+            }
+            md.push_str("| Spalte A | Spalte B |\n| --- | --- |\n| Zelle 1 | Zelle 2 |\n");
+
+            let mut session = Session::new_headless();
+            if let Some(tab) = session.active_doc_mut() {
+                let rope = kmark_buffer::Rope::from_str(&md);
+                tab.saved_rope = rope.clone();
+                tab.rope = rope;
+                tab.saved_revision = Some(tab.revision);
+                tab.reparse();
+            }
+            assert!(!session.active_doc().unwrap().is_dirty());
+
+            session.set_search_query("TODO", SearchOptions::default());
+            let replaced = session.replace_all_matches("# TODO");
+            assert_eq!(replaced, 4);
+
+            let doc = session.active_doc().unwrap();
+            assert!(doc.is_dirty());
+            assert_eq!(
+                doc.outline.len(),
+                4,
+                "all 4 scattered headings must appear in outline"
+            );
+            assert_eq!(doc.blocks, kmark_syntax::parse_blocks(&doc.rope));
+
+            // Verify table byte ranges at the end of the document remain 100% accurate for table ops!
+            let tbl_pos = doc.rope.to_string_lossless().find("Zelle 1").unwrap();
+            session.jump_to_byte_offset(tbl_pos);
+            session.execute_command(Command::TableInsertRowBelow);
+
+            let doc_after_tbl = session.active_doc().unwrap();
+            assert_eq!(
+                doc_after_tbl.blocks,
+                kmark_syntax::parse_blocks(&doc_after_tbl.rope)
+            );
+            let table_count = doc_after_tbl
+                .blocks
+                .iter()
+                .filter(|b| {
+                    matches!(b.kind, kmark_syntax::BlockKind::Table(ref t) if t.body_rows.len() == 2)
+                })
+                .count();
+            assert_eq!(table_count, 1);
+
+            // Two Undos return cleanly to the original saved state (`is_dirty() == false` in O(1)).
+            session.execute_command(Command::Undo);
+            session.execute_command(Command::Undo);
+            assert!(!session.active_doc().unwrap().is_dirty());
+        }
+    }
 }
