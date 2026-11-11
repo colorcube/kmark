@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_DIR}/build-pkg}"
 OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/dist}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.1.1}"
 
 detect_deb_arch() {
     if command -v dpkg >/dev/null 2>&1; then
@@ -42,7 +42,7 @@ Architecture: ${ARCH}
 Installed-Size: ${INSTALLED_KB}
 Maintainer: René Fritz <rf@colorcube.de>
 Homepage: https://github.com/colorcube/kmark
-Depends: libc6, libstdc++6, libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6printsupport6 | libqt6printsupport6t64
+Depends: libc6, libstdc++6, libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6printsupport6 | libqt6printsupport6t64, libqt6network6 | libqt6network6t64
 Description: Native WYSIWYG Markdown and plain-text editor for KDE Plasma
  KMark combines distraction-free WYSIWYG Markdown typography with native KDE
  Plasma integration (Qt6 / KDE Frameworks 6) over a memory-safe Rust Rope and

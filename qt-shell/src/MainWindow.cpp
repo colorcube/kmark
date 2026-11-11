@@ -1380,12 +1380,12 @@ void MainWindow::setupMenusAndToolbars() {
             this,
             T("About KMark", "Über KMark"),
             T(
-                "<h3>KMark 0.1.0</h3>"
+                "<h3>KMark 0.1.1</h3>"
                 "<p>Native WYSIWYG Markdown and plain-text editor for KDE Plasma.</p>"
                 "<p>Architecture: Safe Rust engine (<code>Rope</code> + 2D virtualized layout) with native Qt6/KF6 shell.</p>"
                 "<p><a href=\"https://github.com/colorcube/kmark\">https://github.com/colorcube/kmark</a></p>"
                 "<p>License: GPL-3.0-or-later</p>",
-                "<h3>KMark 0.1.0</h3>"
+                "<h3>KMark 0.1.1</h3>"
                 "<p>Nativer WYSIWYG-Markdown- und Texteditor für KDE Plasma.</p>"
                 "<p>Architektur: Sichere Rust-Engine (<code>Rope</code> + virtualisiertes 2D-Layout) mit nativer Qt6/KF6-Oberfläche.</p>"
                 "<p><a href=\"https://github.com/colorcube/kmark\">https://github.com/colorcube/kmark</a></p>"

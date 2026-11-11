@@ -5,7 +5,14 @@ All notable changes to **KMark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 2026-11-11
+## [0.1.1] - 2026-11-12
+
+### Added
+- **Single-Instance Tab Opening**:
+  - Opening additional `.md` / `.txt` files from Dolphin (`Exec=kmark %U`) or the command line now opens them as tabs in the already-running KMark window and activates the window on both Wayland (`XDG_ACTIVATION_TOKEN`) and X11.
+  - Added `-n` / `--new-window` CLI flag, a *New Window* / *Neues Fenster* desktop action in `de.colorcube.kmark.desktop`, and a *Settings -> Editor & View* toggle (*Open files in existing window as tabs*).
+
+## [0.1.0] - 2026-11-11
 
 ### Added
 - **Single-Buffer Projected Editor (`L0`–`L5`)**:

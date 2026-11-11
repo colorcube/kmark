@@ -58,7 +58,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kmark-buffer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "tempfile",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "kmark-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kmark-buffer",
  "kmark-engine",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "kmark-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kmark-buffer",
  "kmark-layout",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "kmark-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kmark-buffer",
  "kmark-engine",
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "kmark-layout"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kmark-buffer",
  "kmark-syntax",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "kmark-syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kmark-buffer",
  "serde",

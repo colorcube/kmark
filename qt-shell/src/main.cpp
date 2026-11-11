@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationDisplayName(QStringLiteral("KMark"));
     QApplication::setOrganizationName(QStringLiteral("colorcube"));
     QApplication::setOrganizationDomain(QStringLiteral("colorcube.de"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.1.1"));
     QApplication::setDesktopFileName(QStringLiteral("de.colorcube.kmark"));
 
     if (!QIcon::hasThemeIcon(QStringLiteral("format-text-bold"))) {
@@ -245,7 +245,7 @@ int main(int argc, char* argv[]) {
     KAboutData aboutData(
         QStringLiteral("kmark"),
         QStringLiteral("KMark"),
-        QStringLiteral("0.1.0"),
+        QStringLiteral("0.1.1"),
         kmark::trBi(
             uiLang,
             "Native WYSIWYG Markdown and plain-text editor for KDE Plasma",

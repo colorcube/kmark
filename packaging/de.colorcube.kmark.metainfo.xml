@@ -43,6 +43,11 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.1.1" date="2026-11-12">
+      <description>
+        <p>Open files as tabs in the already-running KMark window by default (with -n/--new-window override, taskbar New Window action, and Settings toggle).</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-11">
       <description>
         <p>Initial public release of KMark for Linux and KDE Plasma.</p>
