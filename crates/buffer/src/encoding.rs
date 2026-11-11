@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Supported file text encodings (strict decoding, lossless roundtrip).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -191,8 +191,17 @@ pub fn read_file_auto(path: &Path) -> Result<DecodedDocument, IoError> {
     decode_bytes_auto(&bytes)
 }
 
+/// Maximum symbolic link hops followed when resolving a save target.
+const MAX_SYMLINK_DEPTH: usize = 40;
+
 /// Writes `text` atomically to `path` via a synced sibling temp file so the original file
 /// is never truncated or corrupted on error.
+///
+/// - Follows symbolic links (`canonicalize` / `read_link`) so saving through a symlink updates
+///   the target file without replacing the symlink itself.
+/// - Preserves existing file permissions (`mode`) when overwriting an existing file, or applies
+///   standard `0666 & !umask` permissions when creating a new file (avoiding `0600` temp modes).
+/// - Calls `sync_all()` on both the temporary file and the parent directory after rename.
 pub fn write_file_atomic(
     path: &Path,
     text: &str,
@@ -200,17 +209,91 @@ pub fn write_file_atomic(
     line_ending: LineEnding,
 ) -> Result<(), IoError> {
     let encoded = encode_text(text, encoding, line_ending)?;
-    let parent = path
+    let resolved_path = resolve_save_target(path)?;
+    let parent = resolved_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
+    let existing_perms = fs::metadata(&resolved_path).ok().map(|m| m.permissions());
+
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(&encoded)?;
+    if let Some(perms) = existing_perms {
+        fs::set_permissions(tmp.path(), perms)?;
+    } else {
+        apply_default_new_file_permissions(tmp.path())?;
+    }
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| IoError::Fs(e.error))?;
+    tmp.persist(&resolved_path)
+        .map_err(|e| IoError::Fs(e.error))?;
+    sync_directory(parent);
     Ok(())
+}
+
+fn resolve_save_target(path: &Path) -> Result<PathBuf, std::io::Error> {
+    if let Ok(canon) = fs::canonicalize(path) {
+        return Ok(canon);
+    }
+
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = fs::read_link(&current)?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    current
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(target)
+                };
+                if let Ok(canon) = fs::canonicalize(&current) {
+                    return Ok(canon);
+                }
+            }
+            Ok(_) => return Ok(current),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(std::io::Error::other("too many levels of symbolic links"))
+}
+
+#[cfg(unix)]
+fn apply_default_new_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let umask = read_process_umask().unwrap_or(0o022);
+    let mode = 0o666 & !umask;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn apply_default_new_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_process_umask() -> Option<u32> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Umask:") {
+            return u32::from_str_radix(rest.trim(), 8).ok();
+        }
+    }
+    None
+}
+
+fn sync_directory(dir: &Path) {
+    if let Ok(dir_file) = fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
 }
 
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> Result<String, IoError> {
