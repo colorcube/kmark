@@ -236,6 +236,7 @@ impl DocumentTab {
 
     pub fn reparse(&mut self) {
         self.selection = self.selection.clamp_to(&self.rope);
+        self.last_frame = None;
         self.blocks = parse_blocks(&self.rope);
         self.outline = extract_outline(&self.rope, &self.blocks);
         if self.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
@@ -281,6 +282,7 @@ impl DocumentTab {
 
         if let Some((old_range, new_range)) = diff {
             self.revision = self.revision.wrapping_add(1);
+            self.last_frame = None;
             reparse_changed_rope(&before_r, &self.rope, &mut self.blocks);
             self.outline = extract_outline(&self.rope, &self.blocks);
 
@@ -883,6 +885,7 @@ impl Session {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.view_mode = mode;
                     tab.armed_styles.clear();
+                    tab.last_frame = None;
                     tab.needs_scroll_to_caret = true;
                 }
                 self.layout_config.view_mode = mode;
@@ -936,6 +939,7 @@ impl Session {
                 if let Some((prev_rope, prev_sel)) = tab.history.undo() {
                     let old_r = std::mem::replace(&mut tab.rope, prev_rope);
                     tab.revision = tab.revision.wrapping_add(1);
+                    tab.last_frame = None;
                     tab.selection = prev_sel.clamp_to(&tab.rope);
                     tab.needs_scroll_to_caret = true;
                     reparse_changed_rope(&old_r, &tab.rope, &mut tab.blocks);
@@ -950,6 +954,7 @@ impl Session {
                 if let Some((next_rope, next_sel)) = tab.history.redo() {
                     let old_r = std::mem::replace(&mut tab.rope, next_rope);
                     tab.revision = tab.revision.wrapping_add(1);
+                    tab.last_frame = None;
                     tab.selection = next_sel.clamp_to(&tab.rope);
                     tab.needs_scroll_to_caret = true;
                     reparse_changed_rope(&old_r, &tab.rope, &mut tab.blocks);
@@ -1253,9 +1258,9 @@ impl Session {
                     )
                 };
                 tab.selection = if mods.shift {
-                    Selection::new(tab.selection.anchor, next_head)
+                    Selection::new(tab.selection.anchor, next_head).clamp_to(&tab.rope)
                 } else {
-                    Selection::collapsed(next_head)
+                    Selection::collapsed(next_head).clamp_to(&tab.rope)
                 };
                 tab.needs_scroll_to_caret = true;
             }
@@ -1285,9 +1290,9 @@ impl Session {
                     off
                 };
                 tab.selection = if mods.shift {
-                    Selection::new(tab.selection.anchor, next_head)
+                    Selection::new(tab.selection.anchor, next_head).clamp_to(&tab.rope)
                 } else {
-                    Selection::collapsed(next_head)
+                    Selection::collapsed(next_head).clamp_to(&tab.rope)
                 };
                 tab.needs_scroll_to_caret = true;
             }
