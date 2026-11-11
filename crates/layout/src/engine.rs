@@ -450,6 +450,155 @@ fn byte_offset_in_visual_row(row: &VisualRow, doc_x: f32) -> HitTarget {
 }
 
 const HEADING_SCALES: [f32; 7] = [1.0, 1.90, 1.55, 1.30, 1.15, 1.05, 1.0];
+const MAX_CACHED_BLOCK_HEIGHTS: usize = 16_384;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct HeightCacheConfigKey {
+    prose_w_tenths: u32,
+    default_line_h_tenths: u32,
+    base_font_tenths: u32,
+    line_spacing_hundredths: u32,
+    word_wrap: bool,
+    heading_marks_tag: u8,
+    ui_german: bool,
+}
+
+impl HeightCacheConfigKey {
+    fn from_layout(prose_w: f32, default_line_h: f32, config: &LayoutConfig) -> Self {
+        let marks_tag = match config.heading_marks {
+            HeadingMarkStyle::SlantedBars => 0,
+            HeadingMarkStyle::HashSymbol => 1,
+            HeadingMarkStyle::None => 2,
+        };
+        Self {
+            prose_w_tenths: (prose_w.max(1.0) * 10.0).round() as u32,
+            default_line_h_tenths: (default_line_h.max(1.0) * 10.0).round() as u32,
+            base_font_tenths: (config.base_font_px.max(1.0) * 10.0).round() as u32,
+            line_spacing_hundredths: (config.line_spacing_scale.max(0.5) * 100.0).round() as u32,
+            word_wrap: config.word_wrap,
+            heading_marks_tag: marks_tag,
+            ui_german: config.ui_german,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct BlockContentKey {
+    kind_tag: u8,
+    byte_len: usize,
+    content_hash: u64,
+}
+
+impl BlockContentKey {
+    fn from_block(rope: &Rope, block: &Block) -> Self {
+        let kind_tag = match block.kind {
+            BlockKind::BlankLines => 0,
+            BlockKind::ThematicBreak => 1,
+            BlockKind::Heading { level, .. } => 10u8.saturating_add(level),
+            BlockKind::Paragraph { .. } => 20,
+            BlockKind::ListItem {
+                ordered, ref task, ..
+            } => 30u8
+                .saturating_add(u8::from(ordered.is_some()))
+                .saturating_add(if task.is_some() { 2 } else { 0 }),
+            BlockKind::BlockQuote { alert, .. } => {
+                40u8.saturating_add(alert.map_or(0, |a| match a {
+                    AlertKind::Note => 1,
+                    AlertKind::Tip => 2,
+                    AlertKind::Important => 3,
+                    AlertKind::Warning => 4,
+                    AlertKind::Caution => 5,
+                }))
+            }
+            BlockKind::CodeFence { .. } => 50,
+            BlockKind::Table(_) => 60,
+        };
+        Self {
+            kind_tag,
+            byte_len: block.byte_range.len(),
+            content_hash: rope.hash_byte_range(block.byte_range.clone()),
+        }
+    }
+}
+
+/// Persistent per-tab cache of exact measured formatted block heights so off-screen blocks
+/// retain their exact heights across scrolling and single-site edits (eliminating scroll jumps
+/// and scrollbar breathing).
+#[derive(Clone, Debug, Default)]
+pub struct BlockHeightCache {
+    config_key: Option<HeightCacheConfigKey>,
+    last_rope: Option<Rope>,
+    by_index: Vec<Option<f32>>,
+    by_content: std::collections::HashMap<BlockContentKey, f32>,
+}
+
+impl BlockHeightCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.config_key = None;
+        self.last_rope = None;
+        self.by_index.clear();
+        self.by_content.clear();
+    }
+
+    fn prepare(
+        &mut self,
+        rope: &Rope,
+        block_count: usize,
+        prose_w: f32,
+        default_line_h: f32,
+        config: &LayoutConfig,
+    ) {
+        let next_cfg = HeightCacheConfigKey::from_layout(prose_w, default_line_h, config);
+        if self.config_key != Some(next_cfg) {
+            self.config_key = Some(next_cfg);
+            self.last_rope = Some(rope.clone());
+            self.by_index.clear();
+            self.by_index.resize(block_count, None);
+            self.by_content.clear();
+            return;
+        }
+
+        let same_rope = self
+            .last_rope
+            .as_ref()
+            .is_some_and(|prev| prev.ptr_eq(rope));
+        if !same_rope || self.by_index.len() != block_count {
+            self.last_rope = Some(rope.clone());
+            self.by_index.clear();
+            self.by_index.resize(block_count, None);
+        }
+    }
+
+    fn lookup(&mut self, block_idx: usize, rope: &Rope, block: &Block) -> Option<f32> {
+        if let Some(Some(h)) = self.by_index.get(block_idx).copied() {
+            return Some(h);
+        }
+        let key = BlockContentKey::from_block(rope, block);
+        if let Some(&h) = self.by_content.get(&key) {
+            if let Some(slot) = self.by_index.get_mut(block_idx) {
+                *slot = Some(h);
+            }
+            return Some(h);
+        }
+        None
+    }
+
+    fn record(&mut self, block_idx: usize, rope: &Rope, block: &Block, height: f32) {
+        if let Some(slot) = self.by_index.get_mut(block_idx) {
+            *slot = Some(height);
+        }
+        if self.by_content.len() >= MAX_CACHED_BLOCK_HEIGHTS {
+            self.by_content.clear();
+        }
+        let key = BlockContentKey::from_block(rope, block);
+        self.by_content.insert(key, height);
+    }
+}
 
 /// Builds a viewport-virtualized [`ViewportFrame`] for `(rope, blocks, selection, search_matches)`.
 #[allow(clippy::too_many_arguments)]
@@ -465,6 +614,39 @@ pub fn build_viewport_frame(
     viewport_h: f32,
     scroll_y: f32,
     measurer: &mut dyn TextMeasurer,
+) -> ViewportFrame {
+    build_viewport_frame_cached(
+        rope,
+        blocks,
+        selection,
+        ime_preedit,
+        search_matches,
+        active_match_idx,
+        config,
+        viewport_w,
+        viewport_h,
+        scroll_y,
+        measurer,
+        None,
+    )
+}
+
+/// Builds a viewport-virtualized [`ViewportFrame`] backed by an optional persistent [`BlockHeightCache`]
+/// so measured block heights remain completely invariant during scrolling.
+#[allow(clippy::too_many_arguments)]
+pub fn build_viewport_frame_cached(
+    rope: &Rope,
+    blocks: &[Block],
+    selection: Selection,
+    ime_preedit: Option<&str>,
+    search_matches: &[Range<usize>],
+    active_match_idx: Option<usize>,
+    config: &LayoutConfig,
+    viewport_w: f32,
+    viewport_h: f32,
+    scroll_y: f32,
+    measurer: &mut dyn TextMeasurer,
+    mut height_cache: Option<&mut BlockHeightCache>,
 ) -> ViewportFrame {
     let vw = viewport_w.max(240.0);
     let vh = viewport_h.max(120.0);
@@ -524,11 +706,16 @@ pub fn build_viewport_frame(
         );
     }
 
+    if let Some(cache) = height_cache.as_deref_mut() {
+        cache.prepare(rope, blocks.len(), prose_w, default_line_h, config);
+    }
+
     // Formatted (WYSIWYG / LivePreview) block-indexed virtualized layout!
     let caret_byte = selection.head;
     let caret_line = rope.byte_to_line_col(caret_byte).line;
 
-    // Step 1: fast height estimates for all blocks; full layout for visible window + caret block.
+    // Step 1: cached exact heights (or wrap-aware estimates for never-seen blocks);
+    // full layout for visible + overscan window + active caret block.
     let overscan = vh * 0.75 + 240.0;
     let win_top = (scroll_y - overscan).max(0.0);
     let win_bot = scroll_y + vh + overscan;
@@ -541,19 +728,36 @@ pub fn build_viewport_frame(
     let mut bg_cmds: Vec<DrawCmd> = Vec::new();
     let mut fg_cmds: Vec<DrawCmd> = Vec::new();
 
-    for block in blocks {
-        let est_h = estimate_block_height(block, default_line_h);
+    for (block_idx, block) in blocks.iter().enumerate() {
         let contains_caret = caret_byte >= block.byte_range.start
             && caret_byte <= block.byte_range.end
             || (caret_line >= block.line_range.start && caret_line < block.line_range.end);
-        let near_viewport = y_cursor + est_h >= win_top && y_cursor <= win_bot;
+        let reveal_raw = config.view_mode == ViewMode::LivePreview && contains_caret;
+        let cacheable_formatted = !reveal_raw;
+
+        let cached_h = if cacheable_formatted {
+            height_cache
+                .as_deref_mut()
+                .and_then(|c| c.lookup(block_idx, rope, block))
+        } else {
+            None
+        };
+        let known_or_est_h = cached_h.unwrap_or_else(|| {
+            estimate_block_height(
+                block,
+                prose_w,
+                config.base_font_px,
+                default_line_h,
+                config.word_wrap,
+            )
+        });
+        let near_viewport = y_cursor + known_or_est_h >= win_top && y_cursor <= win_bot;
 
         if !near_viewport && !contains_caret {
-            y_cursor += est_h;
+            y_cursor += known_or_est_h;
             continue;
         }
 
-        let reveal_raw = config.view_mode == ViewMode::LivePreview && contains_caret;
         let block_start_y = y_cursor;
 
         y_cursor = layout_single_block(
@@ -576,16 +780,23 @@ pub fn build_viewport_frame(
             measurer,
         );
 
+        let measured_h = (y_cursor - block_start_y).max(0.0);
+        if cacheable_formatted && let Some(cache) = height_cache.as_deref_mut() {
+            cache.record(block_idx, rope, block, measured_h);
+        }
+
         // Optional Focus Mode: dim non-active blocks!
-        if config.focus_mode && !contains_caret {
-            let block_h = (y_cursor - block_start_y).max(0.0);
-            if block_h > 0.0 {
-                fg_cmds.push(DrawCmd::FillRect {
-                    rect: RectF::new(gutter_w, block_start_y - scroll_y, vw - gutter_w, block_h),
-                    color: config.palette.canvas_bg.with_alpha(150),
-                    radius: 0.0,
-                });
-            }
+        if config.focus_mode && !contains_caret && measured_h > 0.0 {
+            fg_cmds.push(DrawCmd::FillRect {
+                rect: RectF::new(
+                    gutter_w,
+                    block_start_y - scroll_y,
+                    vw - gutter_w,
+                    measured_h,
+                ),
+                color: config.palette.canvas_bg.with_alpha(150),
+                radius: 0.0,
+            });
         }
     }
 
@@ -706,19 +917,95 @@ pub fn build_viewport_frame(
     }
 }
 
-fn estimate_block_height(block: &Block, line_h: f32) -> f32 {
-    let lines = block.line_range.len().max(1) as f32;
+fn estimate_wrapped_visual_lines(
+    byte_len: usize,
+    avail_w: f32,
+    avg_char_px: f32,
+    word_wrap: bool,
+) -> f32 {
+    if !word_wrap || byte_len == 0 {
+        return 1.0;
+    }
+    let chars_per_line = (avail_w.max(80.0) / avg_char_px.max(4.0)).max(10.0);
+    // Account for ~8% word-wrap slack at spaces and occasional multi-byte UTF-8 characters.
+    let approx_chars = (byte_len as f32) * 0.96;
+    ((approx_chars * 1.08) / chars_per_line).ceil().max(1.0)
+}
+
+fn estimate_block_height(
+    block: &Block,
+    prose_w: f32,
+    base_font_px: f32,
+    line_h: f32,
+    word_wrap: bool,
+) -> f32 {
+    let avg_char_px = (base_font_px * 0.54).max(4.5);
     match block.kind {
-        BlockKind::Heading { level, .. } => {
+        BlockKind::BlankLines => (block.line_range.len().max(1) as f32) * (line_h * 0.75),
+        BlockKind::ThematicBreak => 24.0,
+        BlockKind::Heading {
+            level,
+            ref content_range,
+            ..
+        } => {
             let scale = HEADING_SCALES
                 .get(usize::from(level))
                 .copied()
                 .unwrap_or(1.0);
-            line_h * scale + 14.0
+            let h_px = (base_font_px * scale).round();
+            let h_line = line_h * scale;
+            let wrapped = estimate_wrapped_visual_lines(
+                content_range.len(),
+                prose_w - 28.0,
+                h_px * 0.57,
+                word_wrap,
+            );
+            let pad = if level <= 2 { 16.0 } else { 12.0 };
+            wrapped * h_line + pad
+        }
+        BlockKind::Paragraph { ref lines } => {
+            let mut visual_lines = 0.0f32;
+            for (_, r) in lines {
+                visual_lines +=
+                    estimate_wrapped_visual_lines(r.len(), prose_w, avg_char_px, word_wrap);
+            }
+            visual_lines.max(1.0) * line_h + 4.0
+        }
+        BlockKind::ListItem {
+            indent_spaces,
+            ref task,
+            ref content_range,
+            ..
+        } => {
+            let indent_px = (indent_spaces as f32) * (base_font_px * 0.55);
+            let slot_px = 24.0 + if task.is_some() { 22.0 } else { 0.0 };
+            let avail = (prose_w - indent_px - slot_px).max(80.0);
+            let wrapped =
+                estimate_wrapped_visual_lines(content_range.len(), avail, avg_char_px, word_wrap);
+            wrapped * line_h + 2.0
+        }
+        BlockKind::BlockQuote {
+            alert, ref lines, ..
+        } => {
+            let inner_w = (prose_w - 24.0).max(80.0);
+            let mut visual_lines = if alert.is_some() { 1.0 } else { 0.0 };
+            let skip = usize::from(alert.is_some());
+            for ql in lines.iter().skip(skip) {
+                let indent = f32::from(ql.depth.saturating_sub(1)) * 14.0;
+                visual_lines += estimate_wrapped_visual_lines(
+                    ql.content_range.len(),
+                    (inner_w - indent).max(60.0),
+                    avg_char_px,
+                    word_wrap,
+                );
+            }
+            visual_lines.max(1.0) * line_h + 12.0
+        }
+        BlockKind::CodeFence { ref body_lines, .. } => {
+            let code_line_h = line_h * 0.92;
+            28.0 + (body_lines.len().max(1) as f32) * code_line_h + 18.0
         }
         BlockKind::Table(ref t) => (1.0 + t.body_rows.len() as f32) * (line_h + 12.0) + 16.0,
-        BlockKind::ThematicBreak => 24.0,
-        _ => lines * line_h + 8.0,
     }
 }
 

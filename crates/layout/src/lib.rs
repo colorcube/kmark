@@ -6,9 +6,9 @@ pub mod measurer;
 pub mod theme;
 
 pub use engine::{
-    CalloutBadgeHitBox, CheckboxHitBox, CodeLangHitBox, DrawCmd, HeadingMarkStyle, HitTarget,
-    LayoutConfig, PositionedGlyphSpan, RectF, ViewMode, ViewportFrame, VisualRow,
-    build_viewport_frame,
+    BlockHeightCache, CalloutBadgeHitBox, CheckboxHitBox, CodeLangHitBox, DrawCmd,
+    HeadingMarkStyle, HitTarget, LayoutConfig, PositionedGlyphSpan, RectF, ViewMode, ViewportFrame,
+    VisualRow, build_viewport_frame, build_viewport_frame_cached,
 };
 pub use measurer::{FallbackMeasurer, FontMetrics, FontRole, MeasuredRun, TextMeasurer};
 pub use theme::{Rgba, ThemePalette};
@@ -387,5 +387,94 @@ mod tests {
             has_full_bearbeiten,
             "single-word column cell '**Bearbeiten**' was squished and broken across lines"
         );
+    }
+
+    #[test]
+    fn cached_block_heights_eliminate_scroll_jumps_and_scrollbar_breathing() {
+        let mut md = String::new();
+        let long_sentence = "Dies ist ein längerer Absatz mit automatischem Zeilenumbruch, fetten **Begriffen**, `Inline-Code` und realistischer Satzlänge für den Scroll-Test. ";
+        for i in 0..120 {
+            if i % 15 == 0 {
+                md.push_str(&format!("## Abschnitt {i}\n\n"));
+            }
+            md.push_str(&long_sentence.repeat(5));
+            md.push_str("\n\n");
+        }
+
+        let rope = Rope::from_str(&md);
+        let blocks = parse_blocks(&rope);
+        let mut measurer = FallbackMeasurer;
+        let cfg = LayoutConfig::default();
+        let mut height_cache = BlockHeightCache::new();
+
+        // Scroll progressively from top to bottom so every block passes through the viewport/overscan.
+        let mut scroll_y = 0.0f32;
+        let mut last_total_height = 0.0f32;
+        while scroll_y <= 36_000.0 {
+            let f = build_viewport_frame_cached(
+                &rope,
+                &blocks,
+                Selection::collapsed(0),
+                None,
+                &[],
+                None,
+                &cfg,
+                920.0,
+                680.0,
+                scroll_y,
+                &mut measurer,
+                Some(&mut height_cache),
+            );
+            last_total_height = f.total_height;
+            if scroll_y > f.total_height {
+                break;
+            }
+            scroll_y += 500.0;
+        }
+
+        // Now scroll across arbitrary positions (bottom, middle, top, random offsets) and verify:
+        // 1) `total_height` is 100% invariant (zero scrollbar breathing),
+        // 2) every visible row's `y_doc` for a given `line_idx` stays bit-for-bit identical as blocks enter/leave overscan!
+        let mut recorded_line_y = std::collections::HashMap::new();
+        for &probe_scroll in &[
+            last_total_height * 0.85,
+            9500.0,
+            4200.0,
+            1300.0,
+            0.0,
+            6100.0,
+        ] {
+            let f = build_viewport_frame_cached(
+                &rope,
+                &blocks,
+                Selection::collapsed(0),
+                None,
+                &[],
+                None,
+                &cfg,
+                920.0,
+                680.0,
+                probe_scroll,
+                &mut measurer,
+                Some(&mut height_cache),
+            );
+            assert!(
+                (f.total_height - last_total_height).abs() < 0.01,
+                "scrollbar total_height breathed from {last_total_height} to {} at scroll_y={probe_scroll}",
+                f.total_height
+            );
+            for row in &f.visual_rows {
+                let prev = recorded_line_y
+                    .entry((row.line_idx, row.doc_range.start))
+                    .or_insert(row.y_doc);
+                assert!(
+                    (*prev - row.y_doc).abs() < 0.01,
+                    "visual row at line {} jumped from y={} to y={}",
+                    row.line_idx,
+                    *prev,
+                    row.y_doc
+                );
+            }
+        }
     }
 }

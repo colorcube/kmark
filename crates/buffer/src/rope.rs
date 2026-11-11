@@ -289,6 +289,20 @@ impl Rope {
         self.slice_to_string(0..self.len_bytes())
     }
 
+    /// Computes a deterministic 64-bit FNV-1a hash over `range` directly across B-tree leaves
+    /// without allocating a temporary `String`.
+    #[must_use]
+    pub fn hash_byte_range(&self, range: Range<usize>) -> u64 {
+        let len = self.len_bytes();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        if start < end {
+            hash_slice(&self.root, start, end, &mut hash);
+        }
+        hash
+    }
+
     #[must_use]
     pub fn byte_at(&self, offset: usize) -> Option<u8> {
         if offset >= self.len_bytes() {
@@ -713,6 +727,40 @@ fn collect_slice(node: &Node, start: usize, end: usize, out: &mut String) {
                     let cs = start.saturating_sub(acc);
                     let ce = end.saturating_sub(acc).min(cb);
                     collect_slice(child, cs, ce, out);
+                }
+                acc = child_end;
+                if acc >= end {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn hash_slice(node: &Node, start: usize, end: usize, hash: &mut u64) {
+    if start >= end {
+        return;
+    }
+    match node {
+        Node::Leaf { text, .. } => {
+            let s = start.min(text.len());
+            let e = end.min(text.len());
+            if let Some(sub) = text.as_bytes().get(s..e) {
+                for &b in sub {
+                    *hash ^= u64::from(b);
+                    *hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        Node::Internal { children, .. } => {
+            let mut acc = 0usize;
+            for child in children {
+                let cb = child.summary().bytes;
+                let child_end = acc.saturating_add(cb);
+                if start < child_end && end > acc {
+                    let cs = start.saturating_sub(acc);
+                    let ce = end.saturating_sub(acc).min(cb);
+                    hash_slice(child, cs, ce, hash);
                 }
                 acc = child_end;
                 if acc >= end {

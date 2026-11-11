@@ -769,6 +769,7 @@ pub extern "C" fn kmark_session_set_measurer(
         s.measurer.metrics_fn = metrics_fn;
         s.measurer.width_fn = width_fn;
         s.measurer.clear_cache();
+        s.session.clear_layout_caches();
         s.cached_frame = None;
     }));
 }
@@ -786,6 +787,7 @@ pub extern "C" fn kmark_session_set_run_measurer(
         s.measurer.run_user_data = user_data;
         s.measurer.run_layout_fn = run_layout_fn;
         s.measurer.clear_cache();
+        s.session.clear_layout_caches();
         s.cached_frame = None;
     }));
 }
@@ -804,6 +806,7 @@ pub extern "C" fn kmark_session_set_image_measurer(
         s.measurer.image_fn = image_fn;
         s.measurer.image_cache.clear();
         s.measurer.epoch = s.measurer.epoch.wrapping_add(1);
+        s.session.clear_layout_caches();
         s.cached_frame = None;
     }));
 }
@@ -815,6 +818,7 @@ pub extern "C" fn kmark_session_clear_measure_cache(session: *mut KMarkSession) 
     };
     let _ = catch_unwind(AssertUnwindSafe(|| {
         s.measurer.clear_cache();
+        s.session.clear_layout_caches();
         s.cached_frame = None;
     }));
 }

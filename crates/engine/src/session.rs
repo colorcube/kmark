@@ -7,8 +7,8 @@ use kmark_buffer::{
     DocumentHistory, EditGroup, IoError, LineEnding, Rope, Selection, TextEncoding,
 };
 use kmark_layout::{
-    FallbackMeasurer, HeadingMarkStyle, HitTarget, LayoutConfig, TextMeasurer, ThemePalette,
-    ViewMode, ViewportFrame, build_viewport_frame,
+    BlockHeightCache, FallbackMeasurer, HeadingMarkStyle, HitTarget, LayoutConfig, TextMeasurer,
+    ThemePalette, ViewMode, ViewportFrame, build_viewport_frame_cached,
 };
 use kmark_syntax::{
     AlertKind, Block, BlockKind, ColumnAlign, ImageSize, InlineTokenKind, OutlineEntry, StyleFlags,
@@ -144,6 +144,7 @@ pub struct DocumentTab {
     pub history: DocumentHistory,
     pub blocks: Vec<Block>,
     pub outline: Vec<OutlineEntry>,
+    pub height_cache: BlockHeightCache,
     pub last_frame: Option<ViewportFrame>,
     pub word_count: usize,
     pub needs_scroll_to_caret: bool,
@@ -193,6 +194,7 @@ impl DocumentTab {
             history: DocumentHistory::default(),
             blocks: Vec::new(),
             outline: Vec::new(),
+            height_cache: BlockHeightCache::new(),
             last_frame: None,
             word_count: 0,
             needs_scroll_to_caret: false,
@@ -223,6 +225,7 @@ impl DocumentTab {
             history: DocumentHistory::default(),
             blocks: Vec::new(),
             outline: Vec::new(),
+            height_cache: BlockHeightCache::new(),
             last_frame: None,
             word_count: 0,
             needs_scroll_to_caret: false,
@@ -482,6 +485,7 @@ impl Session {
             history: DocumentHistory::default(),
             blocks: Vec::new(),
             outline: Vec::new(),
+            height_cache: BlockHeightCache::new(),
             last_frame: None,
             word_count: 0,
             needs_scroll_to_caret: false,
@@ -754,6 +758,7 @@ impl Session {
                 history: DocumentHistory::default(),
                 blocks: Vec::new(),
                 outline: Vec::new(),
+                height_cache: BlockHeightCache::new(),
                 last_frame: None,
                 word_count: 0,
                 needs_scroll_to_caret: false,
@@ -1560,6 +1565,13 @@ impl Session {
         state
     }
 
+    /// Clears cached block heights across all open tabs (e.g. after a font family or image change).
+    pub fn clear_layout_caches(&mut self) {
+        for tab in &mut self.tabs {
+            tab.height_cache.clear();
+        }
+    }
+
     /// Builds a virtualized [`ViewportFrame`] for the active tab, auto-scrolling to keep the caret visible.
     pub fn render_viewport(
         &mut self,
@@ -1570,7 +1582,7 @@ impl Session {
         let tab = self.tabs.get_mut(self.active_tab)?;
         self.layout_config.view_mode = tab.view_mode;
 
-        let mut frame = build_viewport_frame(
+        let mut frame = build_viewport_frame_cached(
             &tab.rope,
             &tab.blocks,
             tab.selection,
@@ -1582,6 +1594,7 @@ impl Session {
             viewport_h,
             tab.scroll_y,
             measurer,
+            Some(&mut tab.height_cache),
         );
 
         // Auto-scroll caret into view (or center vertically in Typewriter mode!)
@@ -1605,7 +1618,7 @@ impl Session {
 
             if (desired_scroll - tab.scroll_y).abs() > 0.5 {
                 tab.scroll_y = desired_scroll;
-                frame = build_viewport_frame(
+                frame = build_viewport_frame_cached(
                     &tab.rope,
                     &tab.blocks,
                     tab.selection,
@@ -1617,6 +1630,7 @@ impl Session {
                     viewport_h,
                     tab.scroll_y,
                     measurer,
+                    Some(&mut tab.height_cache),
                 );
             }
         }
