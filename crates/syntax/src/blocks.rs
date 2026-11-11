@@ -967,37 +967,54 @@ const MAX_INCREMENTAL_WINDOW_LINES: usize = 512;
 /// - Falls back to full [`parse_blocks`] when code fences are involved or when a scattered edit
 ///   spans more than [`MAX_INCREMENTAL_WINDOW_LINES`] lines / [`MAX_INCREMENTAL_WINDOW_BYTES`] bytes.
 pub fn reparse_changed_rope(old_rope: &Rope, new_rope: &Rope, blocks: &mut Vec<Block>) {
-    if blocks.is_empty() || new_rope.line_count() <= MIN_INCREMENTAL_PARSE_LINES {
+    let _ = reparse_changed_rope_with_min_lines(
+        old_rope,
+        new_rope,
+        blocks,
+        MIN_INCREMENTAL_PARSE_LINES,
+    );
+}
+
+/// Like [`reparse_changed_rope`], with an explicit minimum line-count threshold (`min_lines`)
+/// before incremental window reparsing activates. Returns `true` when the incremental window
+/// splice + tail-shift path executed, and `false` on no-op or full-parse fallback.
+pub fn reparse_changed_rope_with_min_lines(
+    old_rope: &Rope,
+    new_rope: &Rope,
+    blocks: &mut Vec<Block>,
+    min_lines: usize,
+) -> bool {
+    if blocks.is_empty() || new_rope.line_count() <= min_lines {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     }
 
     let Some((old_edit_range, new_edit_range)) = old_rope.diff_byte_range(new_rope) else {
-        return;
+        return false;
     };
 
     if old_edit_range.len() > MAX_INCREMENTAL_WINDOW_BYTES
         || new_edit_range.len() > MAX_INCREMENTAL_WINDOW_BYTES
     {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     }
 
     let Ok(old_b) = isize::try_from(old_rope.len_bytes()) else {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     };
     let Ok(new_b) = isize::try_from(new_rope.len_bytes()) else {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     };
     let Ok(old_l) = isize::try_from(old_rope.line_count()) else {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     };
     let Ok(new_l) = isize::try_from(new_rope.line_count()) else {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     };
 
     let byte_delta = new_b.wrapping_sub(old_b);
@@ -1040,7 +1057,7 @@ pub fn reparse_changed_rope(old_rope: &Rope, new_rope: &Rope, blocks: &mut Vec<B
         || new_win_line_end.saturating_sub(win_line_start) > MAX_INCREMENTAL_WINDOW_LINES
     {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     }
 
     // If old window contains a CodeFence, fall back to full parse in case fences were opened/closed.
@@ -1049,7 +1066,7 @@ pub fn reparse_changed_rope(old_rope: &Rope, new_rope: &Rope, blocks: &mut Vec<B
         .any(|b| matches!(b.kind, BlockKind::CodeFence { .. }))
     {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     }
 
     let replacement = parse_blocks_in_line_range(new_rope, win_line_start..new_win_line_end);
@@ -1058,13 +1075,14 @@ pub fn reparse_changed_rope(old_rope: &Rope, new_rope: &Rope, blocks: &mut Vec<B
         .any(|b| matches!(b.kind, BlockKind::CodeFence { .. }))
     {
         *blocks = parse_blocks(new_rope);
-        return;
+        return false;
     }
 
     for tail_blk in &mut blocks[end_idx..] {
         tail_blk.shift_offsets(byte_delta, line_delta);
     }
     blocks.splice(first_idx..end_idx, replacement);
+    true
 }
 
 /// Incrementally updates `blocks` after `old_rope` becomes `new_rope`.

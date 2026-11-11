@@ -1,12 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Randomized property-based test suite verifying that `reparse_changed_rope`
-//! produces the exact same `Vec<Block>` and `Vec<OutlineEntry>` as a full
-//! `parse_blocks` across arbitrary single-site edits, fence openings/closings,
-//! Setext/ATX transitions, GFM tables, alerts, and scattered `Replace All` edits.
+//! Randomized property-based test suite verifying that incremental reparsing
+//! (`reparse_changed_rope_with_min_lines` and `reparse_changed_rope`) produces the
+//! exact same `Vec<Block>` and `Vec<OutlineEntry>` as a full `parse_blocks` across
+//! arbitrary single-site edits, fence openings/closings, Setext/ATX transitions,
+//! GFM tables, alerts, and scattered `Replace All` edits.
 
 use kmark_buffer::Rope;
-use kmark_syntax::{Block, extract_outline, parse_blocks, reparse_changed_rope};
+use kmark_syntax::{
+    Block, extract_outline, parse_blocks, reparse_changed_rope, reparse_changed_rope_with_min_lines,
+};
 
 #[derive(Clone, Copy)]
 struct SplitMix64(u64);
@@ -32,7 +35,33 @@ impl SplitMix64 {
     }
 }
 
-const MD_SNIPPETS: &[&str] = &[
+/// Snippets without raw code-fence delimiters (used heavily so multi-block edits
+/// stay on the incremental window splice + tail-offset shift path rather than
+/// triggering the code-fence full-parse fallback).
+const NON_FENCE_SNIPPETS: &[&str] = &[
+    "",
+    "\n",
+    "\n\n",
+    "# ",
+    "## Überschrift\n\n",
+    "### TODO Kapitel\n\n",
+    "===\n",
+    "---\n",
+    "***\n",
+    "Normaler Absatz mit **fett**, *kursiv*, `code` und TODO Marker.\n\n",
+    "- Listenpunkt A\n- [ ] Aufgabe offen\n- [x] Aufgabe erledigt\n\n",
+    "1. Erster Schritt\n2. Zweiter Schritt\n\n",
+    "> Einfaches Zitat\n\n",
+    "> [!NOTE] Hinweis\n> Mehrzeiliger Callout-Inhalt.\n\n",
+    "> [!WARNING] Warnung\n\n",
+    "| Spalte A | Spalte B | Wert |\n| :--- | :---: | ---: |\n| Eins | Zwei | 42 € |\n\n",
+    "| Zusatz | Zeile | 99 |\n",
+    "![Diagramm](docs/arch.png \"Abb. 1\"){width=60%}\n\n",
+];
+
+/// Full snippet set including code fences (opened and unclosed) to also verify
+/// seamless fallback transitions whenever code fences enter or leave the edit window.
+const ALL_SNIPPETS: &[&str] = &[
     "",
     "\n",
     "\n\n",
@@ -109,16 +138,88 @@ fn assert_block_invariants(rope: &Rope, blocks: &[Block], ctx: &str) {
     }
 }
 
-#[test]
-fn proptest_incremental_parser_matches_full_parse_across_350_sequences() {
-    for seed in 0..350_u64 {
-        let mut rng = SplitMix64::new(0xFA57_BA5E_0000_0000 ^ seed);
+fn apply_random_markdown_edit(
+    rope: &mut Rope,
+    rng: &mut SplitMix64,
+    allow_fences: bool,
+    bounded_deletion: bool,
+) {
+    let palette = if allow_fences {
+        ALL_SNIPPETS
+    } else {
+        NON_FENCE_SNIPPETS
+    };
 
-        // Build a diverse initial multi-block Markdown document.
+    match rng.gen_range(8) {
+        // Scattered multi-site `Replace All` across the document (like Bug #1)
+        0 => {
+            let text = rope.to_string_lossless();
+            let (needle, replacement) = match rng.gen_range(5) {
+                0 => ("SPECIAL_TODO", "# SPECIAL_TODO"),
+                1 => ("# SPECIAL_TODO", "SPECIAL_TODO"),
+                2 => ("TODO", "# TODO"),
+                3 => ("```", ""),
+                _ => ("- ", "1. "),
+            };
+            if text.contains(needle) {
+                let replaced = text.replace(needle, replacement);
+                *rope = Rope::from_str(&replaced);
+            } else {
+                let pos = rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1));
+                rope.replace_range(
+                    pos..pos,
+                    "\nSPECIAL_TODO Erster Punkt\n\nNormaler Text\n\nSPECIAL_TODO Zweiter Punkt\n",
+                );
+            }
+        }
+        // Localized single-site edit (span <= 64 bytes) so `BlankLines` walls before/after
+        // stay untouched and exercise window splicing + tail block shifting directly
+        1..=5 => {
+            let a = rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1));
+            let max_del = rng.gen_range(64);
+            let b = rope.clamp_char_boundary(a.saturating_add(max_del).min(rope.len_bytes()));
+            let ins = palette[rng.gen_range(palette.len())];
+            rope.replace_range(a..b, ins);
+        }
+        // Multi-block insertion / deletion / replacement
+        _ => {
+            let a = rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1));
+            let b = if bounded_deletion {
+                let max_del = rng.gen_range(600);
+                rope.clamp_char_boundary(a.saturating_add(max_del).min(rope.len_bytes()))
+            } else {
+                rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1))
+            };
+            let range = a.min(b)..a.max(b);
+            let snippet_count = rng.gen_range(4);
+            let mut ins = String::new();
+            for _ in 0..snippet_count {
+                ins.push_str(palette[rng.gen_range(palette.len())]);
+            }
+            rope.replace_range(range, &ins);
+        }
+    }
+}
+
+#[test]
+fn proptest_incremental_parser_matches_full_parse_with_zero_line_threshold() {
+    let mut incremental_hits = 0usize;
+    let mut total_steps = 0usize;
+
+    for seed in 0..300_u64 {
+        let mut rng = SplitMix64::new(0xFA57_BA5E_0000_0000 ^ seed);
+        let allow_fences = seed % 3 == 0;
+        let palette = if allow_fences {
+            ALL_SNIPPETS
+        } else {
+            NON_FENCE_SNIPPETS
+        };
+
+        // Build a diverse multi-block Markdown document separated by blank lines.
         let mut init = String::new();
-        let init_chunks = 6 + rng.gen_range(20);
+        let init_chunks = 10 + rng.gen_range(22);
         for _ in 0..init_chunks {
-            init.push_str(MD_SNIPPETS[rng.gen_range(MD_SNIPPETS.len())]);
+            init.push_str(palette[rng.gen_range(palette.len())]);
         }
 
         let mut rope = Rope::from_str(&init);
@@ -128,47 +229,17 @@ fn proptest_incremental_parser_matches_full_parse_across_350_sequences() {
         let steps = 35 + rng.gen_range(20);
         for step in 0..steps {
             let old_rope = rope.clone();
+            apply_random_markdown_edit(&mut rope, &mut rng, allow_fences, false);
 
-            match rng.gen_range(8) {
-                // Scattered multi-site `Replace All` across the whole document (like Bug #1!)
-                0 | 1 => {
-                    let text = rope.to_string_lossless();
-                    let (needle, replacement) = match rng.gen_range(5) {
-                        0 => ("TODO", "# TODO"),
-                        1 => ("# ", ""),
-                        2 => ("\n\n", "\n---\n"),
-                        3 => ("```", ""),
-                        _ => ("- ", "1. "),
-                    };
-                    if text.contains(needle) {
-                        let replaced = text.replace(needle, replacement);
-                        rope = Rope::from_str(&replaced);
-                    } else {
-                        let pos = rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1));
-                        rope.replace_range(
-                            pos..pos,
-                            "\nTODO Erster Punkt\n\nNormaler Text\n\nTODO Zweiter Punkt\n",
-                        );
-                    }
-                }
-                // Arbitrary single-range insertion / deletion / replacement (including mid-fence & mid-table)
-                _ => {
-                    let a = rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1));
-                    let b = rope.clamp_char_boundary(rng.gen_range(rope.len_bytes() + 1));
-                    let range = a.min(b)..a.max(b);
-                    let snippet_count = rng.gen_range(4);
-                    let mut ins = String::new();
-                    for _ in 0..snippet_count {
-                        ins.push_str(MD_SNIPPETS[rng.gen_range(MD_SNIPPETS.len())]);
-                    }
-                    rope.replace_range(range, &ins);
-                }
+            let used_incremental =
+                reparse_changed_rope_with_min_lines(&old_rope, &rope, &mut incremental_blocks, 0);
+            if used_incremental {
+                incremental_hits += 1;
             }
+            total_steps += 1;
 
-            reparse_changed_rope(&old_rope, &rope, &mut incremental_blocks);
             let full_blocks = parse_blocks(&rope);
-
-            let ctx = format!("seed={seed} step={step}");
+            let ctx = format!("seed={seed} step={step} inc={used_incremental}");
             assert_block_invariants(&rope, &incremental_blocks, &ctx);
             assert_eq!(
                 incremental_blocks,
@@ -183,4 +254,83 @@ fn proptest_incremental_parser_matches_full_parse_across_350_sequences() {
             );
         }
     }
+
+    assert!(
+        incremental_hits >= 5_000,
+        "expected incremental window path to execute at least 5,000 times, got {incremental_hits} / {total_steps}"
+    );
+}
+
+#[test]
+fn proptest_production_reparse_changed_rope_above_300_lines_matches_full_parse() {
+    let mut incremental_hits = 0usize;
+    let mut total_steps = 0usize;
+
+    for seed in 0..80_u64 {
+        let mut rng = SplitMix64::new(0xFB9E_0300_0000_0000 ^ seed);
+        let allow_fences = seed % 4 == 0;
+
+        // Build a ~480-line document so production `reparse_changed_rope` (min_lines = 300)
+        // genuinely exercises the incremental splice + tail-offset shift path.
+        let mut init = String::with_capacity(28_000);
+        for section in 0..115_usize {
+            let marker = if section % 25 == 5 {
+                "SPECIAL_TODO "
+            } else {
+                ""
+            };
+            init.push_str(&format!(
+                "## Abschnitt {section}\n\n{marker}Absatz {section} mit Text und **Formatierung**.\n\n"
+            ));
+            if section % 7 == 0 {
+                init.push_str(NON_FENCE_SNIPPETS[rng.gen_range(NON_FENCE_SNIPPETS.len())]);
+                init.push('\n');
+            }
+        }
+
+        let mut rope = Rope::from_str(&init);
+        assert!(
+            rope.line_count() > 450,
+            "initial line count {} must exceed MIN_INCREMENTAL_PARSE_LINES (300)",
+            rope.line_count()
+        );
+
+        let mut prod_blocks = parse_blocks(&rope);
+        let mut probe_blocks = prod_blocks.clone();
+
+        let steps = 25;
+        for step in 0..steps {
+            let old_rope = rope.clone();
+            apply_random_markdown_edit(&mut rope, &mut rng, allow_fences, true);
+
+            // Production entrypoint (`MIN_INCREMENTAL_PARSE_LINES = 300`)
+            reparse_changed_rope(&old_rope, &rope, &mut prod_blocks);
+            // Instrumented probe with identical `min_lines = 300` threshold
+            let used_incremental =
+                reparse_changed_rope_with_min_lines(&old_rope, &rope, &mut probe_blocks, 300);
+            if used_incremental {
+                incremental_hits += 1;
+            }
+            total_steps += 1;
+
+            let full_blocks = parse_blocks(&rope);
+            let ctx = format!("large seed={seed} step={step} inc={used_incremental}");
+            assert_block_invariants(&rope, &prod_blocks, &ctx);
+            assert_eq!(prod_blocks, probe_blocks, "{ctx}: prod vs probe mismatch");
+            assert_eq!(
+                prod_blocks, full_blocks,
+                "{ctx}: production incremental blocks diverged from full parse!"
+            );
+            assert_eq!(
+                extract_outline(&rope, &prod_blocks),
+                extract_outline(&rope, &full_blocks),
+                "{ctx}: outline diverged"
+            );
+        }
+    }
+
+    assert!(
+        incremental_hits >= 1_200,
+        "expected production >300-line incremental path to execute at least 1,200 times, got {incremental_hits} / {total_steps}"
+    );
 }
