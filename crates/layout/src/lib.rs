@@ -1,15 +1,20 @@
 //! `kmark-layout` (L2): Single-Buffer Projected Layout Engine (WYSIWYG, Live Preview,
 //! Source, Plain Text), 2D Table Grid layout, hit-testing, and Qt `QPainter` DisplayList.
 
+pub mod context;
 pub mod engine;
+pub mod hit_test;
+mod inline_layout;
 pub mod measurer;
+mod table_layout;
 pub mod theme;
 
+pub use context::ViewportRequest;
 pub use engine::{
-    BlockHeightCache, CalloutBadgeHitBox, CheckboxHitBox, CodeLangHitBox, DrawCmd,
-    HeadingMarkStyle, HitTarget, LayoutConfig, PositionedGlyphSpan, RectF, ViewMode, ViewportFrame,
-    VisualRow, build_viewport_frame, build_viewport_frame_cached,
+    BlockHeightCache, DrawCmd, HeadingMarkStyle, LayoutConfig, PositionedGlyphSpan, RectF,
+    ViewMode, ViewportFrame, VisualRow, build_viewport_frame, build_viewport_frame_cached,
 };
+pub use hit_test::{CalloutBadgeHitBox, CheckboxHitBox, CodeLangHitBox, HitTarget};
 pub use measurer::{FallbackMeasurer, FontMetrics, FontRole, MeasuredRun, TextMeasurer};
 pub use theme::{Rgba, ThemePalette};
 
@@ -35,16 +40,18 @@ mod tests {
         };
 
         let frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(bold_pos),
-            None,
-            &[],
-            None,
-            &cfg,
-            960.0,
-            700.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(bold_pos),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 960.0,
+                viewport_h: 700.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
 
@@ -63,16 +70,18 @@ mod tests {
         // Switch to LivePreview on the same caret position: `**` appears on the active line!
         cfg.view_mode = ViewMode::LivePreview;
         let live_frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(bold_pos),
-            None,
-            &[],
-            None,
-            &cfg,
-            960.0,
-            700.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(bold_pos),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 960.0,
+                viewport_h: 700.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
         let live_texts: Vec<&str> = live_frame
@@ -97,16 +106,18 @@ mod tests {
         let cfg = LayoutConfig::default();
 
         let frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(0),
-            None,
-            &[],
-            None,
-            &cfg,
-            900.0,
-            600.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(0),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 900.0,
+                viewport_h: 600.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
 
@@ -135,16 +146,18 @@ mod tests {
         let cfg = LayoutConfig::default();
 
         let frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(0),
-            None,
-            &[],
-            None,
-            &cfg,
-            960.0,
-            600.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(0),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 960.0,
+                viewport_h: 600.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
 
@@ -268,16 +281,18 @@ mod tests {
         let cfg = LayoutConfig::default();
 
         let frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(0),
-            None,
-            &[],
-            None,
-            &cfg,
-            960.0,
-            600.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(0),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 960.0,
+                viewport_h: 600.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
 
@@ -327,16 +342,18 @@ mod tests {
         let cfg = LayoutConfig::default();
 
         let frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(0),
-            None,
-            &[],
-            None,
-            &cfg,
-            900.0,
-            600.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(0),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 900.0,
+                viewport_h: 600.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
 
@@ -365,16 +382,18 @@ mod tests {
         let cfg = LayoutConfig::default();
 
         let frame = build_viewport_frame(
-            &rope,
-            &blocks,
-            Selection::collapsed(0),
-            None,
-            &[],
-            None,
-            &cfg,
-            820.0,
-            600.0,
-            0.0,
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(0),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 820.0,
+                viewport_h: 600.0,
+                scroll_y: 0.0,
+            },
             &mut measurer,
         );
 
@@ -412,16 +431,18 @@ mod tests {
         let mut last_total_height = 0.0f32;
         while scroll_y <= 36_000.0 {
             let f = build_viewport_frame_cached(
-                &rope,
-                &blocks,
-                Selection::collapsed(0),
-                None,
-                &[],
-                None,
-                &cfg,
-                920.0,
-                680.0,
-                scroll_y,
+                &ViewportRequest {
+                    rope: &rope,
+                    blocks: &blocks,
+                    selection: Selection::collapsed(0),
+                    ime_preedit: None,
+                    search_matches: &[],
+                    active_match_idx: None,
+                    config: &cfg,
+                    viewport_w: 920.0,
+                    viewport_h: 680.0,
+                    scroll_y,
+                },
                 &mut measurer,
                 Some(&mut height_cache),
             );
@@ -445,16 +466,18 @@ mod tests {
             6100.0,
         ] {
             let f = build_viewport_frame_cached(
-                &rope,
-                &blocks,
-                Selection::collapsed(0),
-                None,
-                &[],
-                None,
-                &cfg,
-                920.0,
-                680.0,
-                probe_scroll,
+                &ViewportRequest {
+                    rope: &rope,
+                    blocks: &blocks,
+                    selection: Selection::collapsed(0),
+                    ime_preedit: None,
+                    search_matches: &[],
+                    active_match_idx: None,
+                    config: &cfg,
+                    viewport_w: 920.0,
+                    viewport_h: 680.0,
+                    scroll_y: probe_scroll,
+                },
                 &mut measurer,
                 Some(&mut height_cache),
             );

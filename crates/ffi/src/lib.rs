@@ -7,8 +7,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
 use kmark_engine::{
-    Command, KeyCode, KeyModifiers, PointerAction, RenderStateStamp, SearchOptions, Session,
-    UiLanguage,
+    Command, KeyCode, KeyModifiers, LayoutOptionsUpdate, PointerAction, RenderStateStamp,
+    SearchOptions, Session, UiLanguage,
 };
 use kmark_layout::{
     DrawCmd, FallbackMeasurer, FontMetrics, FontRole, HeadingMarkStyle, MeasuredRun, RectF, Rgba,
@@ -671,15 +671,71 @@ struct CachedRenderedFrame {
     caret_rect: KMarkRectF,
 }
 
+const INITIAL_FRAME_CMDS_CAPACITY: usize = 512;
+const INITIAL_TEXT_POOL_CAPACITY: usize = 8192;
+
 pub struct KMarkSession {
     session: Session,
     measurer: QtBridgeMeasurer,
+    poisoned: bool,
     last_error: String,
     frame_cmds: Vec<KMarkDrawCmd>,
     frame_text_pool: Vec<u8>,
     cached_frame: Option<CachedRenderedFrame>,
     outline_items: Vec<KMarkOutlineItem>,
     outline_text_pool: Vec<u8>,
+}
+
+impl KMarkSession {
+    fn mark_poisoned(&mut self) {
+        self.poisoned = true;
+        self.cached_frame = None;
+        self.frame_cmds.clear();
+        self.frame_text_pool.clear();
+        self.outline_items.clear();
+        self.outline_text_pool.clear();
+        self.last_error =
+            "Internal engine panic caught at FFI boundary; session poisoned to protect data."
+                .to_owned();
+    }
+}
+
+/// Executes a mutating FFI closure on `session`, catching any unwinding panic and permanently
+/// poisoning the session handle so inconsistent in-memory state can never overwrite user files.
+fn with_session_mut<R>(
+    session: *mut KMarkSession,
+    default: R,
+    f: impl FnOnce(&mut KMarkSession) -> R,
+) -> R {
+    let Some(s) = (unsafe { session.as_mut() }) else {
+        return default;
+    };
+    if s.poisoned {
+        return default;
+    }
+    if let Ok(val) = catch_unwind(AssertUnwindSafe(|| f(s))) {
+        val
+    } else {
+        s.mark_poisoned();
+        default
+    }
+}
+
+/// Executes a read-only FFI closure on `session`. When `allow_when_poisoned` is `false`, returns
+/// `default` immediately if `session` was poisoned by a prior panic.
+fn with_session_ref<R>(
+    session: *const KMarkSession,
+    default: R,
+    allow_when_poisoned: bool,
+    f: impl FnOnce(&KMarkSession) -> R,
+) -> R {
+    let Some(s) = (unsafe { session.as_ref() }) else {
+        return default;
+    };
+    if s.poisoned && !allow_when_poisoned {
+        return default;
+    }
+    catch_unwind(AssertUnwindSafe(|| f(s))).unwrap_or(default)
 }
 
 unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> &'a str {
@@ -705,9 +761,10 @@ pub extern "C" fn kmark_session_new() -> *mut KMarkSession {
         Box::into_raw(Box::new(KMarkSession {
             session: Session::new(),
             measurer: QtBridgeMeasurer::default(),
+            poisoned: false,
             last_error: String::new(),
-            frame_cmds: Vec::with_capacity(512),
-            frame_text_pool: Vec::with_capacity(8192),
+            frame_cmds: Vec::with_capacity(INITIAL_FRAME_CMDS_CAPACITY),
+            frame_text_pool: Vec::with_capacity(INITIAL_TEXT_POOL_CAPACITY),
             cached_frame: None,
             outline_items: Vec::new(),
             outline_text_pool: Vec::new(),
@@ -729,29 +786,22 @@ pub extern "C" fn kmark_session_free(session: *mut KMarkSession) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_set_ui_language(session: *mut KMarkSession, lang: u8) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let ui_lang = if lang == 0 {
             UiLanguage::English
         } else {
             UiLanguage::German
         };
         s.session.set_ui_language(ui_lang);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_ui_language(session: *const KMarkSession) -> u8 {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return 1;
-    };
-    catch_unwind(AssertUnwindSafe(|| match s.session.ui_language {
+    with_session_ref(session, 1, true, |s| match s.session.ui_language {
         UiLanguage::English => 0,
         UiLanguage::German => 1,
-    }))
-    .unwrap_or(1)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -761,17 +811,14 @@ pub extern "C" fn kmark_session_set_measurer(
     metrics_fn: Option<KMarkMetricsFn>,
     width_fn: Option<KMarkWidthFn>,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.measurer.user_data = user_data;
         s.measurer.metrics_fn = metrics_fn;
         s.measurer.width_fn = width_fn;
         s.measurer.clear_cache();
         s.session.clear_layout_caches();
         s.cached_frame = None;
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -780,16 +827,13 @@ pub extern "C" fn kmark_session_set_run_measurer(
     user_data: *mut c_void,
     run_layout_fn: Option<KMarkRunLayoutFn>,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.measurer.run_user_data = user_data;
         s.measurer.run_layout_fn = run_layout_fn;
         s.measurer.clear_cache();
         s.session.clear_layout_caches();
         s.cached_frame = None;
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -798,29 +842,23 @@ pub extern "C" fn kmark_session_set_image_measurer(
     user_data: *mut c_void,
     image_fn: Option<KMarkImageSizeFn>,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.measurer.image_user_data = user_data;
         s.measurer.image_fn = image_fn;
         s.measurer.image_cache.clear();
         s.measurer.epoch = s.measurer.epoch.wrapping_add(1);
         s.session.clear_layout_caches();
         s.cached_frame = None;
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_clear_measure_cache(session: *mut KMarkSession) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.measurer.clear_cache();
         s.session.clear_layout_caches();
         s.cached_frame = None;
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -835,22 +873,16 @@ pub extern "C" fn kmark_palette_breeze_dark() -> KMarkPalette {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_set_palette(session: *mut KMarkSession, palette: KMarkPalette) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.set_palette(palette.into());
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_get_layout_settings(
     session: *const KMarkSession,
 ) -> KMarkLayoutSettings {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return KMarkLayoutSettings::default();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, KMarkLayoutSettings::default(), false, |s| {
         let cfg = s.session.layout_config();
         let view_mode = match cfg.view_mode {
             ViewMode::Wysiwyg => 0,
@@ -874,8 +906,7 @@ pub extern "C" fn kmark_session_get_layout_settings(
             line_spacing: cfg.line_spacing_scale,
             max_prose_width: cfg.max_prose_width_px,
         }
-    }))
-    .unwrap_or_default()
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -883,10 +914,7 @@ pub extern "C" fn kmark_session_set_layout_settings(
     session: *mut KMarkSession,
     settings: KMarkLayoutSettings,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let view_mode = match settings.view_mode {
             1 => ViewMode::LivePreview,
             2 => ViewMode::Source,
@@ -898,101 +926,72 @@ pub extern "C" fn kmark_session_set_layout_settings(
             2 => HeadingMarkStyle::None,
             _ => HeadingMarkStyle::SlantedBars,
         };
-        s.session.set_layout_options(
+        s.session.set_layout_options(LayoutOptionsUpdate {
             view_mode,
             heading_marks,
-            settings.word_wrap,
-            settings.show_line_numbers,
-            settings.focus_mode,
-            settings.typewriter_mode,
-            settings.base_font_px,
-            settings.line_spacing,
-            settings.max_prose_width,
-        );
-    }));
+            word_wrap: settings.word_wrap,
+            show_line_numbers: settings.show_line_numbers,
+            focus_mode: settings.focus_mode,
+            typewriter_mode: settings.typewriter_mode,
+            base_font_px: settings.base_font_px,
+            line_spacing_scale: settings.line_spacing,
+            max_prose_width_px: settings.max_prose_width,
+        });
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_tab_count(session: *const KMarkSession) -> usize {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.tab_count())).unwrap_or(0)
+    with_session_ref(session, 0, true, |s| s.session.tab_count())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_active_tab(session: *const KMarkSession) -> usize {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.active_tab_index())).unwrap_or(0)
+    with_session_ref(session, 0, true, |s| s.session.active_tab_index())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_set_active_tab(session: *mut KMarkSession, idx: usize) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.set_active_tab(idx);
         s.measurer.image_cache.clear();
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_new_tab(session: *mut KMarkSession) -> usize {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.new_empty_tab())).unwrap_or(0)
+    with_session_mut(session, 0, |s| s.session.new_empty_tab())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_open_guide_tab(session: *mut KMarkSession) -> usize {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.open_guide_tab())).unwrap_or(0)
+    with_session_mut(session, 0, |s| s.session.open_guide_tab())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_open_reference_tab(session: *mut KMarkSession) -> usize {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.open_reference_tab())).unwrap_or(0)
+    with_session_mut(session, 0, |s| s.session.open_reference_tab())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_close_tab(session: *mut KMarkSession, idx: usize) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.close_tab(idx);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_tab_is_dirty(session: *const KMarkSession, idx: usize) -> bool {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, false, true, |s| {
         s.session.tabs().get(idx).is_some_and(|t| t.is_dirty())
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_tab_has_path(session: *const KMarkSession, idx: usize) -> bool {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, false, true, |s| {
         s.session.tabs().get(idx).is_some_and(|t| t.path.is_some())
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1000,16 +999,12 @@ pub extern "C" fn kmark_session_tab_title_alloc(
     session: *const KMarkSession,
     idx: usize,
 ) -> *mut c_char {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, ptr::null_mut(), true, |s| {
         s.session
             .tabs()
             .get(idx)
             .map_or(ptr::null_mut(), |t| alloc_c_string(&t.title))
-    }))
-    .unwrap_or(ptr::null_mut())
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1017,17 +1012,13 @@ pub extern "C" fn kmark_session_tab_path_alloc(
     session: *const KMarkSession,
     idx: usize,
 ) -> *mut c_char {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, ptr::null_mut(), true, |s| {
         s.session
             .tabs()
             .get(idx)
             .and_then(|t| t.path.as_ref())
             .map_or(ptr::null_mut(), |p| alloc_c_string(&p.to_string_lossy()))
-    }))
-    .unwrap_or(ptr::null_mut())
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1035,10 +1026,7 @@ pub extern "C" fn kmark_session_open_file(
     session: *mut KMarkSession,
     path_utf8: *const c_char,
 ) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, false, |s| {
         let path_str = unsafe { cstr_to_str(path_utf8) };
         match s.session.open_file(path_str) {
             Ok(_) => {
@@ -1050,16 +1038,12 @@ pub extern "C" fn kmark_session_open_file(
                 false
             }
         }
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_save_active(session: *mut KMarkSession) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| match s.session.save_active_tab() {
+    with_session_mut(session, false, |s| match s.session.save_active_tab() {
         Ok(()) => {
             s.last_error.clear();
             true
@@ -1068,8 +1052,7 @@ pub extern "C" fn kmark_session_save_active(session: *mut KMarkSession) -> bool 
             s.last_error = err.to_string();
             false
         }
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1077,10 +1060,7 @@ pub extern "C" fn kmark_session_save_active_as(
     session: *mut KMarkSession,
     path_utf8: *const c_char,
 ) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, false, |s| {
         let path_str = unsafe { cstr_to_str(path_utf8) };
         match s.session.save_active_tab_as(path_str) {
             Ok(()) => {
@@ -1092,84 +1072,81 @@ pub extern "C" fn kmark_session_save_active_as(
                 false
             }
         }
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_flush_recovery(session: *mut KMarkSession) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.flush_recovery_draft();
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_recover_drafts(session: *mut KMarkSession) -> usize {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.recover_crash_drafts())).unwrap_or(0)
+    with_session_mut(session, 0, |s| s.session.recover_crash_drafts())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_clear_recovery(session: *mut KMarkSession) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.clear_all_recovery_drafts();
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_last_error_alloc(session: *const KMarkSession) -> *mut c_char {
+    with_session_ref(session, ptr::null_mut(), true, |s| {
+        alloc_c_string(&s.last_error)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_is_poisoned(session: *const KMarkSession) -> bool {
     let Some(s) = (unsafe { session.as_ref() }) else {
-        return ptr::null_mut();
+        return false;
     };
-    catch_unwind(AssertUnwindSafe(|| alloc_c_string(&s.last_error))).unwrap_or(ptr::null_mut())
+    s.poisoned
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_emergency_text_alloc(
+    session: *const KMarkSession,
+    idx: usize,
+) -> *mut c_char {
+    with_session_ref(session, ptr::null_mut(), true, |s| {
+        s.session.tabs().get(idx).map_or(ptr::null_mut(), |t| {
+            alloc_c_string(&t.rope.to_string_lossless())
+        })
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_selected_text_alloc(session: *const KMarkSession) -> *mut c_char {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, ptr::null_mut(), false, |s| {
         s.session
             .active_doc()
             .map_or(ptr::null_mut(), |d| alloc_c_string(&d.selected_text()))
-    }))
-    .unwrap_or(ptr::null_mut())
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_export_html_alloc(session: *const KMarkSession) -> *mut c_char {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, ptr::null_mut(), false, |s| {
         s.session
             .active_doc()
             .map_or(ptr::null_mut(), |d| alloc_c_string(&d.export_html()))
-    }))
-    .unwrap_or(ptr::null_mut())
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_active_code_language_alloc(
     session: *const KMarkSession,
 ) -> *mut c_char {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return ptr::null_mut();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, ptr::null_mut(), false, |s| {
         let st = s.session.toolbar_state();
         alloc_c_string(&st.code_language)
-    }))
-    .unwrap_or(ptr::null_mut())
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1185,10 +1162,7 @@ pub extern "C" fn kmark_string_free(s: *mut c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_exec_command(session: *mut KMarkSession, cmd_id: u32) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let mapped = match cmd_id {
             0 => Some(Command::Undo),
             1 => Some(Command::Redo),
@@ -1237,7 +1211,7 @@ pub extern "C" fn kmark_session_exec_command(session: *mut KMarkSession, cmd_id:
         if let Some(cmd) = mapped {
             s.session.execute_command(cmd);
         }
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1245,15 +1219,12 @@ pub extern "C" fn kmark_session_insert_code_fence(
     session: *mut KMarkSession,
     language_utf8: *const c_char,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let lang = unsafe { cstr_to_str(language_utf8) };
         s.session.execute_command(Command::InsertCodeFence {
             language: lang.to_owned(),
         });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1263,16 +1234,13 @@ pub extern "C" fn kmark_session_set_code_fence_language(
     open_line_start: usize,
     language_utf8: *const c_char,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let lang = unsafe { cstr_to_str(language_utf8) };
         s.session.execute_command(Command::SetCodeFenceLanguage {
             open_line_start: has_offset.then_some(open_line_start),
             language: lang.to_owned(),
         });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1282,10 +1250,7 @@ pub extern "C" fn kmark_session_set_callout_kind(
     open_line_start: usize,
     alert_kind: u8,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let kind = match alert_kind {
             1 => Some(AlertKind::Note),
             2 => Some(AlertKind::Tip),
@@ -1298,7 +1263,7 @@ pub extern "C" fn kmark_session_set_callout_kind(
             open_line_start: has_offset.then_some(open_line_start),
             kind,
         });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1307,17 +1272,14 @@ pub extern "C" fn kmark_session_insert_link(
     text_utf8: *const c_char,
     url_utf8: *const c_char,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let txt = unsafe { cstr_to_str(text_utf8) };
         let url = unsafe { cstr_to_str(url_utf8) };
         s.session.execute_command(Command::InsertLink {
             text: txt.to_owned(),
             url: url.to_owned(),
         });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1338,10 +1300,7 @@ pub extern "C" fn kmark_session_insert_image_ex(
     size_kind: u8,
     size_value: u16,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let alt = unsafe { cstr_to_str(alt_utf8) };
         let url = unsafe { cstr_to_str(url_utf8) };
         let caption = if caption_utf8.is_null() {
@@ -1356,7 +1315,7 @@ pub extern "C" fn kmark_session_insert_image_ex(
             caption,
             size: decode_image_size(size_kind, size_value),
         });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1370,10 +1329,7 @@ pub extern "C" fn kmark_session_update_image(
     size_kind: u8,
     size_value: u16,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let alt = unsafe { cstr_to_str(alt_utf8) };
         let url = unsafe { cstr_to_str(url_utf8) };
         let caption = if caption_utf8.is_null() {
@@ -1389,7 +1345,7 @@ pub extern "C" fn kmark_session_update_image(
             caption,
             size: decode_image_size(size_kind, size_value),
         });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1399,14 +1355,11 @@ pub extern "C" fn kmark_session_image_at(
     vy: f32,
     out_info: *mut KMarkImageInfo,
 ) -> bool {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return false;
-    };
     let Some(out) = (unsafe { out_info.as_mut() }) else {
         return false;
     };
-    catch_unwind(AssertUnwindSafe(|| {
-        *out = KMarkImageInfo::default();
+    *out = KMarkImageInfo::default();
+    with_session_ref(session, false, false, |s| {
         let Some(img) = s.session.image_at(vx, vy) else {
             return false;
         };
@@ -1424,8 +1377,7 @@ pub extern "C" fn kmark_session_image_at(
                 .map_or(ptr::null_mut(), alloc_c_string),
         };
         true
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1451,24 +1403,18 @@ pub extern "C" fn kmark_image_info_free(info: *mut KMarkImageInfo) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_insert_table(session: *mut KMarkSession, cols: usize, rows: usize) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session
             .execute_command(Command::InsertTable { cols, rows });
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_insert_text(session: *mut KMarkSession, text_utf8: *const c_char) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let text = unsafe { cstr_to_str(text_utf8) };
         s.session.insert_text(text);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1476,17 +1422,14 @@ pub extern "C" fn kmark_session_set_ime_preedit(
     session: *mut KMarkSession,
     preedit_utf8: *const c_char,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         if preedit_utf8.is_null() {
             s.session.set_ime_preedit(None);
         } else {
             let text = unsafe { cstr_to_str(preedit_utf8) };
             s.session.set_ime_preedit(Some(text));
         }
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1497,10 +1440,7 @@ pub extern "C" fn kmark_session_key_press(
     ctrl: bool,
     alt: bool,
 ) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, false, |s| {
         let mapped = match key_code {
             0 => Some(KeyCode::Left),
             1 => Some(KeyCode::Right),
@@ -1522,8 +1462,7 @@ pub extern "C" fn kmark_session_key_press(
             return false;
         };
         s.session.handle_key(k, KeyModifiers { shift, ctrl, alt })
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1536,10 +1475,7 @@ pub extern "C" fn kmark_session_pointer_press(
     ctrl: bool,
     alt: bool,
 ) -> KMarkPointerResult {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return KMarkPointerResult::default();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, KMarkPointerResult::default(), |s| {
         match s
             .session
             .handle_pointer_press(vx, vy, click_count, KeyModifiers { shift, ctrl, alt })
@@ -1567,28 +1503,21 @@ pub extern "C" fn kmark_session_pointer_press(
                 str_alloc: alloc_c_string(current_kind.tag_str()),
             },
         }
-    }))
-    .unwrap_or_default()
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_pointer_drag(session: *mut KMarkSession, vx: f32, vy: f32) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.handle_pointer_drag(vx, vy);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_drop_cursor_at(session: *mut KMarkSession, vx: f32, vy: f32) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.drop_cursor_at(vx, vy);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1598,33 +1527,23 @@ pub extern "C" fn kmark_session_hover_interactive(
     vy: f32,
     ctrl: bool,
 ) -> bool {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, false, false, |s| {
         s.session.hover_interactive_at(vx, vy, ctrl)
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_set_scroll_y(session: *mut KMarkSession, scroll_y: f32) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.set_scroll_y(scroll_y);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_scroll_pixels(session: *mut KMarkSession, delta_y: f32) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.scroll_by_pixels(delta_y);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1635,10 +1554,7 @@ pub extern "C" fn kmark_session_set_search(
     whole_word: bool,
     use_regex: bool,
 ) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         let q = unsafe { cstr_to_str(query_utf8) };
         s.session.set_search_query(
             q,
@@ -1648,23 +1564,17 @@ pub extern "C" fn kmark_session_set_search(
                 use_regex,
             },
         );
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_find_next(session: *mut KMarkSession) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.find_next())).unwrap_or(false)
+    with_session_mut(session, false, |s| s.session.find_next())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_find_prev(session: *mut KMarkSession) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| s.session.find_prev())).unwrap_or(false)
+    with_session_mut(session, false, |s| s.session.find_prev())
 }
 
 #[unsafe(no_mangle)]
@@ -1672,14 +1582,10 @@ pub extern "C" fn kmark_session_replace_one(
     session: *mut KMarkSession,
     replacement_utf8: *const c_char,
 ) -> bool {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return false;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, false, |s| {
         let rep = unsafe { cstr_to_str(replacement_utf8) };
         s.session.replace_current_match(rep)
-    }))
-    .unwrap_or(false)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1687,32 +1593,22 @@ pub extern "C" fn kmark_session_replace_all(
     session: *mut KMarkSession,
     replacement_utf8: *const c_char,
 ) -> usize {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return 0;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, 0, |s| {
         let rep = unsafe { cstr_to_str(replacement_utf8) };
         s.session.replace_all_matches(rep)
-    }))
-    .unwrap_or(0)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_jump_to_offset(session: *mut KMarkSession, byte_offset: usize) {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return;
-    };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, (), |s| {
         s.session.jump_to_byte_offset(byte_offset);
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_outline(session: *mut KMarkSession) -> KMarkOutlineView {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return KMarkOutlineView::default();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, KMarkOutlineView::default(), |s| {
         s.outline_items.clear();
         s.outline_text_pool.clear();
 
@@ -1736,16 +1632,12 @@ pub extern "C" fn kmark_session_outline(session: *mut KMarkSession) -> KMarkOutl
             text_pool_ptr: s.outline_text_pool.as_ptr(),
             text_pool_len: s.outline_text_pool.len(),
         }
-    }))
-    .unwrap_or_default()
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_toolbar_state(session: *const KMarkSession) -> KMarkToolbarState {
-    let Some(s) = (unsafe { session.as_ref() }) else {
-        return KMarkToolbarState::default();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_ref(session, KMarkToolbarState::default(), false, |s| {
         let st = s.session.toolbar_state();
         let vm = match st.view_mode {
             ViewMode::Wysiwyg => 0,
@@ -1787,8 +1679,7 @@ pub extern "C" fn kmark_session_toolbar_state(session: *const KMarkSession) -> K
                 .active_index
                 .map_or(0, |i| i.saturating_add(1)),
         }
-    }))
-    .unwrap_or_default()
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1797,10 +1688,7 @@ pub extern "C" fn kmark_session_render_frame(
     viewport_w: f32,
     viewport_h: f32,
 ) -> KMarkFrameView {
-    let Some(s) = (unsafe { session.as_mut() }) else {
-        return KMarkFrameView::default();
-    };
-    catch_unwind(AssertUnwindSafe(|| {
+    with_session_mut(session, KMarkFrameView::default(), |s| {
         let vw_bits = viewport_w.to_bits();
         let vh_bits = viewport_h.to_bits();
 
@@ -2028,8 +1916,7 @@ pub extern "C" fn kmark_session_render_frame(
             text_pool_ptr: s.frame_text_pool.as_ptr(),
             text_pool_len: s.frame_text_pool.len(),
         }
-    }))
-    .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]
@@ -2282,6 +2169,47 @@ mod tests {
             calls_after_first_frame,
             "blink repaint must reuse cached frame without re-running layout"
         );
+
+        kmark_session_free(ptr);
+    }
+
+    #[test]
+    fn ffi_panic_poisons_session_blocks_mutations_and_recovers_emergency_text() {
+        let ptr = kmark_session_new();
+        assert!(!ptr.is_null());
+        assert!(!kmark_session_is_poisoned(ptr));
+
+        let original_text = "# Wichtige Notizen\n\nUngespeicherter Entwurf vor internem Fehler.";
+        let c_text = CString::new(original_text).expect("cstring");
+        kmark_session_insert_text(ptr, c_text.as_ptr());
+
+        // Simulate an unexpected panic inside a mutating FFI entrypoint.
+        let panicked_result = with_session_mut(ptr, 42usize, |_s| -> usize {
+            panic!("simulated invariant violation");
+        });
+        assert_eq!(panicked_result, 42);
+        assert!(kmark_session_is_poisoned(ptr));
+
+        // Subsequent mutations, saves, and layout renders must be refused on a poisoned handle.
+        let corrupted_text = CString::new("\nKORRUPT").expect("cstring");
+        kmark_session_insert_text(ptr, corrupted_text.as_ptr());
+        assert!(!kmark_session_save_active(ptr));
+        let frame = kmark_session_render_frame(ptr, 800.0, 600.0);
+        assert_eq!(frame.cmds_len, 0);
+
+        // Read-only emergency inspection & plain-text rescue must still work cleanly!
+        assert_eq!(kmark_session_tab_count(ptr), 1);
+        assert!(kmark_session_tab_is_dirty(ptr, 0));
+
+        let err_ptr = kmark_session_last_error_alloc(ptr);
+        assert!(!err_ptr.is_null());
+        assert!(unsafe { cstr_to_str(err_ptr) }.contains("poisoned"));
+        kmark_string_free(err_ptr);
+
+        let rescued_ptr = kmark_session_emergency_text_alloc(ptr, 0);
+        assert!(!rescued_ptr.is_null());
+        assert_eq!(unsafe { cstr_to_str(rescued_ptr) }, original_text);
+        kmark_string_free(rescued_ptr);
 
         kmark_session_free(ptr);
     }

@@ -463,13 +463,17 @@ void EditorViewport::resetCaretBlink() {
 }
 
 void EditorViewport::paintEvent(QPaintEvent* event) {
-    if (m_session == nullptr) {
+    if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
         return;
     }
 
     const float vw = static_cast<float>(viewport()->width());
     const float vh = static_cast<float>(viewport()->height());
     const KMarkFrameView frame = kmark_session_render_frame(m_session, vw, vh);
+    if (kmark_session_is_poisoned(m_session)) {
+        QTimer::singleShot(0, this, [this]() { emit stateChanged(); });
+        return;
+    }
 
     {
         QScrollBar* sb = verticalScrollBar();

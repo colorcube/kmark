@@ -246,6 +246,9 @@ private:
     QTimer m_recoveryTimer;
     int m_lastIconLightness = -1;
     bool m_updatingUi = false;
+    bool m_handlingPoisonedSession = false;
+
+    void handlePoisonedSession();
 };
 
 } // namespace kmark

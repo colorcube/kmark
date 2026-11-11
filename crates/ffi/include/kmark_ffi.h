@@ -378,6 +378,8 @@ void kmark_session_flush_recovery(KMarkSession* session);
 size_t kmark_session_recover_drafts(KMarkSession* session);
 void kmark_session_clear_recovery(KMarkSession* session);
 char* kmark_session_last_error_alloc(const KMarkSession* session);
+bool kmark_session_is_poisoned(const KMarkSession* session);
+char* kmark_session_emergency_text_alloc(const KMarkSession* session, size_t idx);
 
 /* Clipboard, HTML export & strings */
 char* kmark_session_selected_text_alloc(const KMarkSession* session);

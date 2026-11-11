@@ -8,7 +8,7 @@ use kmark_buffer::{
 };
 use kmark_layout::{
     BlockHeightCache, FallbackMeasurer, HeadingMarkStyle, HitTarget, LayoutConfig, TextMeasurer,
-    ThemePalette, ViewMode, ViewportFrame, build_viewport_frame_cached,
+    ThemePalette, ViewMode, ViewportFrame, ViewportRequest, build_viewport_frame_cached,
 };
 use kmark_syntax::{
     AlertKind, Block, BlockKind, ColumnAlign, ImageSize, InlineTokenKind, OutlineEntry, StyleFlags,
@@ -78,6 +78,20 @@ pub struct ImageAtPoint {
     pub src: String,
     pub caption: Option<String>,
     pub size: Option<ImageSize>,
+}
+
+/// Bundled layout settings update passed to [`Session::set_layout_options`].
+#[derive(Clone, Copy, Debug)]
+pub struct LayoutOptionsUpdate {
+    pub view_mode: ViewMode,
+    pub heading_marks: HeadingMarkStyle,
+    pub word_wrap: bool,
+    pub show_line_numbers: bool,
+    pub focus_mode: bool,
+    pub typewriter_mode: bool,
+    pub base_font_px: f32,
+    pub line_spacing_scale: f32,
+    pub max_prose_width_px: f32,
 }
 
 impl Default for ActiveToolbarState {
@@ -601,36 +615,25 @@ impl Session {
         &self.layout_config
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_layout_options(
-        &mut self,
-        view_mode: ViewMode,
-        heading_marks: HeadingMarkStyle,
-        word_wrap: bool,
-        show_line_numbers: bool,
-        focus_mode: bool,
-        typewriter_mode: bool,
-        base_font_px: f32,
-        line_spacing_scale: f32,
-        max_prose_width_px: f32,
-    ) {
-        let mode_changed = self.layout_config.view_mode != view_mode;
-        self.layout_config.view_mode = view_mode;
-        self.layout_config.heading_marks = heading_marks;
-        self.layout_config.word_wrap = word_wrap;
-        self.layout_config.show_line_numbers = show_line_numbers;
-        self.layout_config.focus_mode = focus_mode;
-        self.layout_config.typewriter_mode = typewriter_mode;
-        self.layout_config.base_font_px = base_font_px.clamp(10.0, 40.0);
-        self.layout_config.line_spacing_scale = line_spacing_scale.clamp(1.10, 2.20);
-        self.layout_config.max_prose_width_px = max_prose_width_px.clamp(500.0, 2400.0);
+    pub fn set_layout_options(&mut self, opts: LayoutOptionsUpdate) {
+        let mode_changed = self.layout_config.view_mode != opts.view_mode;
+        self.layout_config.view_mode = opts.view_mode;
+        self.layout_config.heading_marks = opts.heading_marks;
+        self.layout_config.word_wrap = opts.word_wrap;
+        self.layout_config.show_line_numbers = opts.show_line_numbers;
+        self.layout_config.focus_mode = opts.focus_mode;
+        self.layout_config.typewriter_mode = opts.typewriter_mode;
+        self.layout_config.base_font_px = opts.base_font_px.clamp(10.0, 40.0);
+        self.layout_config.line_spacing_scale = opts.line_spacing_scale.clamp(1.10, 2.20);
+        self.layout_config.max_prose_width_px = opts.max_prose_width_px.clamp(500.0, 2400.0);
 
         if mode_changed
             && let Some(tab) = self.tabs.get_mut(self.active_tab)
             && tab.view_mode != ViewMode::PlainText
         {
-            tab.view_mode = view_mode;
+            tab.view_mode = opts.view_mode;
             tab.armed_styles.clear();
+            tab.last_frame = None;
             tab.needs_scroll_to_caret = true;
         }
     }
@@ -1574,6 +1577,7 @@ impl Session {
     pub fn clear_layout_caches(&mut self) {
         for tab in &mut self.tabs {
             tab.height_cache.clear();
+            tab.last_frame = None;
         }
     }
 
@@ -1588,16 +1592,18 @@ impl Session {
         self.layout_config.view_mode = tab.view_mode;
 
         let mut frame = build_viewport_frame_cached(
-            &tab.rope,
-            &tab.blocks,
-            tab.selection,
-            tab.ime_preedit.as_deref(),
-            &self.search.matches,
-            self.search.active_index,
-            &self.layout_config,
-            viewport_w,
-            viewport_h,
-            tab.scroll_y,
+            &ViewportRequest {
+                rope: &tab.rope,
+                blocks: &tab.blocks,
+                selection: tab.selection,
+                ime_preedit: tab.ime_preedit.as_deref(),
+                search_matches: &self.search.matches,
+                active_match_idx: self.search.active_index,
+                config: &self.layout_config,
+                viewport_w,
+                viewport_h,
+                scroll_y: tab.scroll_y,
+            },
             measurer,
             Some(&mut tab.height_cache),
         );
@@ -1624,16 +1630,18 @@ impl Session {
             if (desired_scroll - tab.scroll_y).abs() > 0.5 {
                 tab.scroll_y = desired_scroll;
                 frame = build_viewport_frame_cached(
-                    &tab.rope,
-                    &tab.blocks,
-                    tab.selection,
-                    tab.ime_preedit.as_deref(),
-                    &self.search.matches,
-                    self.search.active_index,
-                    &self.layout_config,
-                    viewport_w,
-                    viewport_h,
-                    tab.scroll_y,
+                    &ViewportRequest {
+                        rope: &tab.rope,
+                        blocks: &tab.blocks,
+                        selection: tab.selection,
+                        ime_preedit: tab.ime_preedit.as_deref(),
+                        search_matches: &self.search.matches,
+                        active_match_idx: self.search.active_index,
+                        config: &self.layout_config,
+                        viewport_w,
+                        viewport_h,
+                        scroll_y: tab.scroll_y,
+                    },
                     measurer,
                     Some(&mut tab.height_cache),
                 );

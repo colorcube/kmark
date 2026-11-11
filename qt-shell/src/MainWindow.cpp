@@ -29,6 +29,7 @@
 #include <QPrintPreviewDialog>
 #include <QPrinter>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -1605,6 +1606,12 @@ void MainWindow::syncUiState() {
     if (m_session == nullptr) {
         return;
     }
+    if (kmark_session_is_poisoned(m_session)) {
+        if (!m_handlingPoisonedSession) {
+            QTimer::singleShot(0, this, &MainWindow::handlePoisonedSession);
+        }
+        return;
+    }
     m_updatingUi = true;
     const KMarkToolbarState st = kmark_session_toolbar_state(m_session);
     const KMarkLayoutSettings ls = kmark_session_get_layout_settings(m_session);
@@ -1926,7 +1933,100 @@ bool MainWindow::confirmCloseTab(size_t tabIdx) {
     return true;
 }
 
+void MainWindow::handlePoisonedSession() {
+    if (m_handlingPoisonedSession || m_session == nullptr || !kmark_session_is_poisoned(m_session)) {
+        return;
+    }
+    m_handlingPoisonedSession = true;
+    m_recoveryTimer.stop();
+    if (m_viewport != nullptr) {
+        m_viewport->setEnabled(false);
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Critical);
+    box.setWindowTitle(T("Internal Engine Error — Emergency Save", "Interner Engine-Fehler — Notfallspeicherung"));
+    box.setText(T(
+        "An unexpected internal error occurred in the editor engine.\n\n"
+        "To protect your files on disk, further editing has been locked. "
+        "Would you like to save emergency plain-text copies of your open documents before closing KMark?",
+        "In der Editor-Engine ist ein unerwarteter interner Fehler aufgetreten.\n\n"
+        "Zum Schutz Ihrer bestehenden Dateien wurde die weitere Bearbeitung gesperrt. "
+        "Möchten Sie vor dem Schließen von KMark Notfall-Kopien Ihrer geöffneten Dokumente speichern?"
+    ));
+    QPushButton* saveBtn = box.addButton(
+        T("Save Emergency Copies…", "Notfall-Kopien speichern…"),
+        QMessageBox::AcceptRole
+    );
+    box.addButton(T("Close Without Saving", "Ohne Speichern beenden"), QMessageBox::RejectRole);
+    box.setDefaultButton(saveBtn);
+    box.exec();
+
+    if (box.clickedButton() == saveBtn) {
+        const size_t count = kmark_session_tab_count(m_session);
+        for (size_t i = 0; i < count; ++i) {
+            const QString content = takeFfiString(kmark_session_emergency_text_alloc(m_session, i));
+            const bool dirty = kmark_session_tab_is_dirty(m_session, i);
+            if (content.isEmpty() && !dirty) {
+                continue;
+            }
+            const QString origPath = takeFfiString(kmark_session_tab_path_alloc(m_session, i));
+            const QString title = takeFfiString(kmark_session_tab_title_alloc(m_session, i));
+
+            QString suggested;
+            if (!origPath.isEmpty()) {
+                const QFileInfo fi(origPath);
+                const QString ext = fi.suffix().isEmpty() ? QStringLiteral("md") : fi.suffix();
+                suggested = fi.dir().filePath(
+                    QStringLiteral("%1-recovered.%2").arg(fi.completeBaseName(), ext)
+                );
+            } else {
+                QString safeTitle = title.isEmpty() ? QStringLiteral("document") : title;
+                safeTitle.replace(QLatin1Char('/'), QLatin1Char('_'));
+                suggested = QDir::home().filePath(QStringLiteral("%1-recovered.md").arg(safeTitle));
+            }
+
+            const QString dest = QFileDialog::getSaveFileName(
+                this,
+                T("Save Emergency Copy (%1)", "Notfall-Kopie speichern (%1)").arg(title),
+                suggested,
+                T(
+                    "Markdown & Text Files (*.md *.markdown *.txt);;All Files (*)",
+                    "Markdown- & Textdateien (*.md *.markdown *.txt);;Alle Dateien (*)"
+                )
+            );
+            if (dest.isEmpty()) {
+                continue;
+            }
+            QSaveFile out(dest);
+            if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                || out.write(content.toUtf8()) < 0
+                || !out.commit()) {
+                QMessageBox::warning(
+                    this,
+                    T("Emergency Save Failed", "Notfallspeicherung fehlgeschlagen"),
+                    out.errorString()
+                );
+            }
+        }
+    }
+    close();
+}
+
 void MainWindow::closeEvent(QCloseEvent* event) {
+    if (m_session != nullptr && kmark_session_is_poisoned(m_session)) {
+        if (!m_handlingPoisonedSession) {
+            handlePoisonedSession();
+        }
+        m_recoveryTimer.stop();
+        m_settings.lastFolderRoot = m_folderRootPath;
+        m_settings.windowGeometry = saveGeometry();
+        m_settings.windowState = saveState();
+        m_settings.save();
+        event->accept();
+        return;
+    }
+
     const size_t count = kmark_session_tab_count(m_session);
     for (size_t i = 0; i < count; ++i) {
         if (!confirmCloseTab(i)) {

@@ -17,8 +17,8 @@ pub use reference::{MARKDOWN_REFERENCE_DE, MARKDOWN_REFERENCE_EN};
 pub use sample::{MARKDOWN_GUIDE_DE, MARKDOWN_GUIDE_EN, UiLanguage};
 pub use search::{SearchOptions, SearchState};
 pub use session::{
-    ActiveToolbarState, DocumentTab, EngineError, ImageAtPoint, PointerAction, RenderStateStamp,
-    Session,
+    ActiveToolbarState, DocumentTab, EngineError, ImageAtPoint, LayoutOptionsUpdate, PointerAction,
+    RenderStateStamp, Session,
 };
 
 #[cfg(test)]
