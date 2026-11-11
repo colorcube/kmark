@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/kxmlgui5/kmark">
+        <file>kmarkui.rc</file>
+    </qresource>
+    <qresource prefix="/">
+        <file>icons/de.colorcube.kmark.svg</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,16 @@
+[package]
+name = "kmark-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "KMark headless CLI: Markdown document inspection, outline extraction, HTML5 export, command catalog, and latency benchmark"
+
+[lints]
+workspace = true
+
+[dependencies]
+kmark-buffer.workspace = true
+kmark-syntax.workspace = true
+kmark-layout.workspace = true
+kmark-engine.workspace = true

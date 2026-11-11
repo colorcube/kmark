@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-qt:
+    name: Rust Workspace & Qt6/KF6 Build (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Qt6 & KDE Frameworks 6 dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ ninja-build pkg-config dpkg-dev \
+            qt6-base-dev libgl1-mesa-dev \
+            libkf6xmlgui-dev libkf6configwidgets-dev libkf6coreaddons-dev libkf6i18n-dev || \
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ ninja-build pkg-config dpkg-dev qt6-base-dev libgl1-mesa-dev
+
+      - name: Check formatting & Clippy lints
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Rust unit tests
+        run: cargo test --workspace
+
+      - name: Build native KMark GUI & CLI
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Smoke-test headless screenshot rendering
+        run: |
+          LC_ALL=C.UTF-8 QT_QPA_PLATFORM=offscreen ./build/kmark --screenshot /tmp/kmark-ci.png
+          test -s /tmp/kmark-ci.png

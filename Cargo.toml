@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/buffer",
+    "crates/syntax",
+    "crates/layout",
+    "crates/engine",
+    "crates/ffi",
+    "apps/kmark-cli",
+]
+default-members = [
+    "crates/buffer",
+    "crates/syntax",
+    "crates/layout",
+    "crates/engine",
+    "crates/ffi",
+    "apps/kmark-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.90"
+description = "Native WYSIWYG Markdown and plain-text editor for KDE Plasma"
+repository = "https://github.com/colorcube/kmark"
+
+[workspace.dependencies]
+kmark-buffer = { path = "crates/buffer" }
+kmark-syntax = { path = "crates/syntax" }
+kmark-layout = { path = "crates/layout" }
+kmark-engine = { path = "crates/engine" }
+kmark-ffi = { path = "crates/ffi" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1"
+unicode-width = "0.1"
+regex = "1"
+log = "0.4"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+dbg_macro = "warn"
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

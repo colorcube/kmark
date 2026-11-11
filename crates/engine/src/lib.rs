@@ -1,0 +1,270 @@
+//! `kmark-engine` (L3): Multi-tab document session, command registry, armed inline
+//! formatting, smart structural editing, 2D table manipulation, find/replace, and crash recovery.
+
+pub mod commands;
+pub mod input;
+pub mod recovery;
+pub mod reference;
+pub mod sample;
+pub mod search;
+pub mod session;
+
+pub use commands::{ArmedStyle, COMMAND_CATALOG, Command, CommandDescriptor};
+pub use input::{KeyCode, KeyModifiers};
+pub use kmark_syntax::ImageSize;
+pub use recovery::{RecoveryDraft, RecoveryStore};
+pub use reference::{MARKDOWN_REFERENCE_DE, MARKDOWN_REFERENCE_EN};
+pub use sample::{MARKDOWN_GUIDE_DE, MARKDOWN_GUIDE_EN, UiLanguage};
+pub use search::{SearchOptions, SearchState};
+pub use session::{
+    ActiveToolbarState, DocumentTab, EngineError, ImageAtPoint, PointerAction, Session,
+};
+
+#[cfg(test)]
+mod tests {
+    use kmark_layout::ViewMode;
+    use kmark_syntax::ColumnAlign;
+
+    use super::*;
+
+    #[test]
+    fn armed_bold_formatting_never_inserts_empty_asterisks() {
+        let mut session = Session::new_headless();
+        session.execute_command(Command::ToggleBold);
+
+        // Buffer is STILL completely empty until the user actually types a character!
+        assert_eq!(session.active_doc().unwrap().rope.to_string_lossless(), "");
+        assert!(session.toolbar_state().bold);
+
+        session.insert_text("K");
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "**K**"
+        );
+        session.insert_text("lar");
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "**Klar**"
+        );
+    }
+
+    #[test]
+    fn smart_list_continuation_and_exit_on_empty_item() {
+        let mut session = Session::new_headless();
+        session.insert_text("1. Erster Punkt");
+        session.handle_key(KeyCode::Enter, KeyModifiers::default());
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "1. Erster Punkt\n2. "
+        );
+
+        // Pressing Enter again on empty `2. ` exits the list cleanly!
+        session.handle_key(KeyCode::Enter, KeyModifiers::default());
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "1. Erster Punkt\n"
+        );
+    }
+
+    #[test]
+    fn table_insert_tab_navigation_and_alignment_preserve_markdown() {
+        let mut session = Session::new_headless();
+        session.execute_command(Command::InsertTable { cols: 2, rows: 1 });
+        session.insert_text("Produkt");
+        session.handle_key(KeyCode::Tab, KeyModifiers::default());
+        session.insert_text("Preis");
+        session.handle_key(KeyCode::Tab, KeyModifiers::default());
+        session.insert_text("KMark");
+        session.handle_key(KeyCode::Tab, KeyModifiers::default());
+        session.insert_text("0 €");
+
+        // Align second column right
+        session.execute_command(Command::TableSetAlign(ColumnAlign::Right));
+        let md = session.active_doc().unwrap().rope.to_string_lossless();
+        assert!(md.contains("Produkt"));
+        assert!(md.contains("0 €"));
+        assert!(md.contains("---:"));
+        assert_eq!(md.lines().count(), 3);
+
+        // Pressing Tab at the very end of the table appends a brand new row!
+        session.handle_key(KeyCode::Tab, KeyModifiers::default());
+        let md_after = session.active_doc().unwrap().rope.to_string_lossless();
+        assert_eq!(md_after.lines().count(), 4);
+    }
+
+    #[test]
+    fn wysiwyg_left_right_skips_hidden_markers_and_undo_restores_all() {
+        let mut session = Session::new_headless();
+        session.insert_text("Vor **Fett** Nach");
+        session.execute_command(Command::SetViewMode(ViewMode::Wysiwyg));
+
+        // Walk all the way left from the end: caret never lands on a half-marker byte
+        for _ in 0..20 {
+            session.handle_key(KeyCode::Left, KeyModifiers::default());
+            let head = session.active_doc().unwrap().selection.head;
+            assert!(session.active_doc().unwrap().rope.is_char_boundary(head));
+        }
+
+        session.execute_command(Command::Undo);
+        assert_eq!(session.active_doc().unwrap().rope.to_string_lossless(), "");
+        session.execute_command(Command::Redo);
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "Vor **Fett** Nach"
+        );
+    }
+
+    #[test]
+    fn code_fence_language_command_and_complete_reference_tabs_work() {
+        let mut session = Session::new_headless();
+        session.execute_command(Command::InsertCodeFence {
+            language: "rust".to_owned(),
+        });
+        session.insert_text("let x = 42;");
+        assert!(session.toolbar_state().in_code_block);
+        assert_eq!(session.toolbar_state().code_language, "rust");
+
+        session.execute_command(Command::SetCodeFenceLanguage {
+            open_line_start: None,
+            language: "python".to_owned(),
+        });
+        assert_eq!(session.toolbar_state().code_language, "python");
+        assert!(
+            session
+                .active_doc()
+                .unwrap()
+                .rope
+                .to_string_lossless()
+                .starts_with("```python\n")
+        );
+
+        session.set_ui_language(UiLanguage::English);
+        let idx_en = session.open_reference_tab();
+        assert!(session.tabs()[idx_en].outline.len() >= 8);
+
+        session.set_ui_language(UiLanguage::German);
+        let idx_de = session.open_reference_tab();
+        assert!(session.tabs()[idx_de].outline.len() >= 8);
+    }
+
+    #[test]
+    fn image_context_commands_caption_replace_and_size_work_with_undo() {
+        let mut session = Session::new_headless();
+        session.execute_command(Command::InsertImage {
+            alt: "Foto".to_owned(),
+            url: "alt.png".to_owned(),
+            caption: None,
+            size: None,
+        });
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "![Foto](alt.png)"
+        );
+
+        let _ = session.render_viewport_fallback(900.0, 600.0);
+        // Find the rendered image badge in the viewport and verify `image_at` hits it!
+        let row = &session
+            .active_doc()
+            .unwrap()
+            .last_frame
+            .as_ref()
+            .unwrap()
+            .visual_rows[0];
+        let hit = session
+            .image_at(row.spans[0].x + 5.0, row.y_doc + 5.0)
+            .expect("expected image_at hit");
+        assert_eq!(hit.src, "alt.png");
+        assert_eq!(hit.caption, None);
+        assert_eq!(hit.size, None);
+
+        // 1. Add caption & set 50% relative size
+        session.execute_command(Command::UpdateImage {
+            range: hit.range,
+            alt: hit.alt,
+            url: hit.src,
+            caption: Some("Abbildung 1: Übersicht".to_owned()),
+            size: Some(ImageSize::Percent(50)),
+        });
+        let updated = session.active_doc().unwrap().rope.to_string_lossless();
+        assert_eq!(
+            updated,
+            "![Foto](alt.png \"Abbildung 1: Übersicht\"){width=50%}"
+        );
+
+        // 2. Replace image while keeping caption & size
+        session.execute_command(Command::UpdateImage {
+            range: 0..updated.len(),
+            alt: "Foto".to_owned(),
+            url: "neu.png".to_owned(),
+            caption: Some("Abbildung 1: Übersicht".to_owned()),
+            size: Some(ImageSize::Percent(50)),
+        });
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "![Foto](neu.png \"Abbildung 1: Übersicht\"){width=50%}"
+        );
+
+        // 3. Undo reverts cleanly step by step
+        session.execute_command(Command::Undo);
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "![Foto](alt.png \"Abbildung 1: Übersicht\"){width=50%}"
+        );
+        session.execute_command(Command::Undo);
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "![Foto](alt.png)"
+        );
+    }
+
+    #[test]
+    fn callout_type_switcher_preserves_custom_title_and_supports_plain_quote_and_undo() {
+        let mut session = Session::new_headless();
+        session.insert_text("> [!NOTE] Wichtiges Detail\n> Zweite Zeile.");
+
+        let frame = session.render_viewport_fallback(900.0, 600.0).unwrap();
+        assert_eq!(frame.callout_badges.len(), 1);
+        let badge_rect = frame.callout_badges[0].rect_doc;
+
+        let action = session.handle_pointer_press(
+            badge_rect.x + 4.0,
+            badge_rect.y + 4.0,
+            1,
+            KeyModifiers::default(),
+        );
+        assert_eq!(
+            action,
+            PointerAction::EditCalloutKind {
+                open_line_start: 0,
+                current_kind: kmark_syntax::AlertKind::Note,
+            }
+        );
+
+        // Switch from NOTE -> WARNING while preserving custom title
+        session.execute_command(Command::SetCalloutKind {
+            open_line_start: Some(0),
+            kind: Some(kmark_syntax::AlertKind::Warning),
+        });
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "> [!WARNING] Wichtiges Detail\n> Zweite Zeile."
+        );
+
+        // Convert Callout to plain blockquote
+        session.execute_command(Command::SetCalloutKind {
+            open_line_start: Some(0),
+            kind: None,
+        });
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "> Wichtiges Detail\n> Zweite Zeile."
+        );
+
+        // Undo restores WARNING callout
+        session.execute_command(Command::Undo);
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "> [!WARNING] Wichtiges Detail\n> Zweite Zeile."
+        );
+    }
+}

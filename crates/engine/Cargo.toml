@@ -1,0 +1,21 @@
+[package]
+name = "kmark-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "KMark L3 editing engine: multi-tab session, command registry, smart Markdown/table transformations, search/replace, and crash recovery"
+
+[lints]
+workspace = true
+
+[dependencies]
+kmark-buffer.workspace = true
+kmark-syntax.workspace = true
+kmark-layout.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true

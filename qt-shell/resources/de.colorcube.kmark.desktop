@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=KMark
+GenericName=Markdown & Text Editor
+GenericName[de]=Markdown- & Texteditor
+Comment=Fast WYSIWYG Markdown and plain-text editor for KDE Plasma
+Comment[de]=Schneller WYSIWYG-Markdown- und Texteditor für KDE Plasma
+Keywords=Markdown;Editor;WYSIWYG;Notes;GFM;Text;
+Keywords[de]=Markdown;Editor;WYSIWYG;Notizen;GFM;Text;
+Exec=kmark %U
+Icon=de.colorcube.kmark
+Terminal=false
+Categories=Qt;KDE;Utility;TextEditor;
+MimeType=text/markdown;text/x-markdown;text/plain;
+StartupWMClass=kmark

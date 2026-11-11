@@ -1,0 +1,97 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb-and-tgz:
+    name: Build .deb & .tar.gz (Ubuntu 24.04 x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Qt6 / KF6 & packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ pkg-config dpkg-dev file \
+            qt6-base-dev libgl1-mesa-dev \
+            libkf6xmlgui-dev libkf6configwidgets-dev libkf6coreaddons-dev libkf6i18n-dev || \
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ pkg-config dpkg-dev file qt6-base-dev libgl1-mesa-dev
+
+      - name: Build .deb and .tar.gz packages
+        run: ./scripts/build-packages.sh
+
+      - name: Upload Ubuntu artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-deb-tgz
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+
+  build-rpm:
+    name: Build .rpm (Fedora KDE / KF6 x86_64)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Fedora build & RPM dependencies
+        run: |
+          dnf install -y \
+            cmake gcc-c++ make rpm-build file git \
+            cargo rust \
+            qt6-qtbase-devel \
+            kf6-kxmlgui-devel kf6-kconfigwidgets-devel kf6-kcoreaddons-devel kf6-ki18n-devel
+
+      - name: Build .rpm package
+        run: |
+          cmake -B build-rpm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build-rpm -j "$(nproc)"
+          mkdir -p dist
+          cpack --config build-rpm/CPackConfig.cmake -G RPM -B dist
+          rm -rf dist/_CPack_Packages
+
+      - name: Upload Fedora RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-rpm
+          path: dist/*.rpm
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-deb-and-tgz, build-rpm]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all built packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: release-assets
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

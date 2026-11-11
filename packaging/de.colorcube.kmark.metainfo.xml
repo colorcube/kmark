@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>de.colorcube.kmark</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>KMark</name>
+  <summary>Native WYSIWYG Markdown and plain-text editor for KDE Plasma</summary>
+  <summary xml:lang="de">Nativer WYSIWYG-Markdown- und Texteditor für KDE Plasma</summary>
+  <developer id="de.colorcube">
+    <name>René Fritz</name>
+  </developer>
+  <description>
+    <p>
+      KMark combines distraction-free WYSIWYG Markdown typography with the speed,
+      reliability, and native look-and-feel of KDE Plasma (Qt6 / KDE Frameworks 6).
+      A memory-safe Rust engine (piece/chunk Rope + incremental CommonMark/GFM parser
+      + virtualized 2D viewport layout) renders documents of 100,000+ lines without
+      browser/Electron overhead.
+    </p>
+    <p xml:lang="de">
+      KMark verbindet ablenkungsfreie WYSIWYG-Markdown-Typografie mit der Geschwindigkeit,
+      Zuverlässigkeit und nativen Integration von KDE Plasma (Qt6 / KDE Frameworks 6).
+      Eine speichersichere Rust-Engine (Rope-Textpuffer + inkrementeller CommonMark/GFM-Parser
+      + virtualisiertes 2D-Layout) verarbeitet selbst Dokumente mit über 100.000 Zeilen verzögerungsfrei.
+    </p>
+    <ul>
+      <li>Four seamless view modes: Formatted (WYSIWYG), Live Preview, Markdown Source, and Plain Text (TXT)</li>
+      <li>True 2D GFM table editing with contextual table toolbar, smart column balancing, and Tab/Shift+Tab navigation</li>
+      <li>Six curated Appearance Presets (Breeze, Modern, Classic, Calm, Dark, Technical), custom presets, and unified Settings dialog</li>
+      <li>Clickable code block language badge, Callout type switcher, and interactive task list checkboxes</li>
+      <li>Inline images with captions, relative percentage sizing, drag &amp; drop, and right-click image context menu</li>
+      <li>Automatic KDE/system locale detection (English &amp; German), Quick Reference (F1), and Complete Markdown Reference (Shift+F1)</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/colorcube/kmark</url>
+  <url type="bugtracker">https://github.com/colorcube/kmark/issues</url>
+  <launchable type="desktop-id">de.colorcube.kmark.desktop</launchable>
+  <provides>
+    <binary>kmark</binary>
+    <mediatype>text/markdown</mediatype>
+    <mediatype>text/x-markdown</mediatype>
+    <mediatype>text/plain</mediatype>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-11-11">
+      <description>
+        <p>Initial public release of KMark for Linux and KDE Plasma.</p>
+      </description>
+    </release>
+  </releases>
+</component>

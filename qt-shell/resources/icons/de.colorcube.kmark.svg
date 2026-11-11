@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2c313a"/>
+      <stop offset="100%" stop-color="#1e2229"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3daee9"/>
+      <stop offset="100%" stop-color="#1d99f3"/>
+    </linearGradient>
+  </defs>
+  <!-- Document card -->
+  <rect x="8" y="5" width="48" height="54" rx="7" fill="url(#sheet)" stroke="#4b5362" stroke-width="1.5"/>
+  <!-- Top Breeze accent bar -->
+  <path d="M15 5 H49 A7 7 0 0 1 56 12 V14 H8 V12 A7 7 0 0 1 15 5 Z" fill="url(#accent)"/>
+  <!-- Signature slanted heading bars + title rule -->
+  <polygon points="16,21 19,21 17,29 14,29" fill="#3daee9"/>
+  <polygon points="21,21 24,21 22,29 19,29" fill="#3daee9"/>
+  <rect x="27" y="23" width="21" height="4" rx="2" fill="#eff0f1"/>
+  <!-- Markdown M + Down arrow emblem -->
+  <path d="M15 49 V35 H18.8 L23.2 41.8 L27.6 35 H31.4 V49 H27.8 V40.6 L23.2 47.2 L18.6 40.6 V49 Z" fill="#eff0f1"/>
+  <path d="M41.5 35 H45.5 V43 H49.5 L43.5 49.5 L37.5 43 H41.5 Z" fill="#3daee9"/>
+</svg>
