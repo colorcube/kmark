@@ -38,18 +38,27 @@ KMark uses a **Single-Buffer Projected Editor** architecture written in **safe R
   - Drag & drop image files (`.png`, `.jpg`, `.svg`, `.webp`, `.gif`, `.avif`) from Dolphin or paste screenshots directly from the clipboard to insert clean relative paths and render local images inline.
   - Supports centered italic **image captions** (`![alt](img.png "Caption")`) and **relative percentage widths** (`![alt](img.png "Caption"){width=50%}`), editable via a right-click **Image Context Menu** (*Add/Edit Caption*, *Replace Image*, *Size: Automatic / 25%–100% / Custom %*).
 - **Armed Formatting & Smart Structural Editing**:
-  - Pressing `Ctrl+B` or `Ctrl+I` outside a word arms the style without Littering empty `****` markers into the buffer until you actually type.
+  - Pressing `Ctrl+B` or `Ctrl+I` outside a word arms the style without littering empty `****` markers into the buffer until you actually type.
   - `Enter` continues bullet lists, numbered lists (`1.` -> `2.`), task lists, and blockquotes — and exits cleanly on a second `Enter` on an empty item.
-- **Bilingual Native KDE Plasma UI (`English` & `Deutsch`)**:
-  - Automatically follows the KDE Plasma / system locale (`KLocalizedString` / `LANGUAGE` / `LANG`).
+- **Native KDE Plasma Shell (`English` & `Deutsch`)**:
+  - Integrates with KDE Frameworks 6 (`KXmlGuiWindow`, Breeze Light & Dark `QPalette` tracking, standard KDE shortcuts) and automatically detects the system locale (`KLocalizedString` / `LANGUAGE` / `LANG`), currently shipping built-in `English` and `German` UI strings (`I18n.h`).
   - Built-in **Markdown Quick Reference** (`F1`) and **Markdown Complete Reference** (`Shift+F1`).
-  - Persistent **Open Recent** (`File -> Open Recent`) menu, Native Breeze Light & Breeze Dark `QPalette` tracking, dockable *Outline* (`F9`) & *Folder Tree* (`F7`) with full parent/home navigation and a PhpStorm-style **Select Opened File** action button, Kate-style bottom Find/Replace bar (`Ctrl+F` / `Ctrl+R`, RegEx), HTML5 export, and PDF/CUPS print preview.
-- **Sub-Millisecond Latency on Huge Documents**:
-  - Persistent Copy-on-Write B-tree `Rope` (`O(log N)`), incremental block parser, and viewport virtualization (`< 1 ms` full edit + layout cycle on 60,000+ lines).
+  - Persistent **Open Recent** (`File -> Open Recent`) menu, multi-tab crash recovery (`~/.local/state/kmark/recovery/`), dockable *Outline* (`F9`) & *Folder Tree* (`F7`) with parent/home navigation and a PhpStorm-style **Select Opened File** action button, Kate-style bottom Find/Replace bar (`Ctrl+F` / `Ctrl+R`, RegEx), HTML5 export, and PDF/CUPS print preview.
+- **Fast Virtualized Editing on Large Documents**:
+  - Persistent Copy-on-Write B-tree `Rope` (`O(log N)`), exact diff-window incremental block parser, persistent `BlockHeightCache` scroll virtualization, single-pass `QTextLayout` run shaping, and cached cursor-blink frames (`< 1 ms` headless edit + layout cycle on 60,000+ lines in `kmark-cli bench` using `FallbackMeasurer`).
 
 ## Status
 
 Beta. Developed and tested on Fedora 44 with KDE Plasma 6 (KWin 6.8).
+
+## Architectural Trade-offs & Known Limitations
+
+KMark renders directly from a single UTF-8 `Rope` onto a custom `QPainter` `DisplayList` rather than converting Markdown into a `QTextDocument` or embedding `KTextEditor`. This avoids lossy Markdown <-> AST round-trips and makes switching between **Formatted (`WYSIWYG`)**, **Live Preview**, **Markdown Source**, and **Plain Text** an instant `O(1)` projection change, at the cost of not inheriting Qt's rich-text widget subsystems automatically:
+
+- **Accessibility (`QAccessible`)**: Screen-reader / assistive-technology exposure for the custom canvas viewport is not yet implemented.
+- **BiDi / RTL & Complex Script Shaping**: Left-to-right Latin, CJK, and emoji grapheme clusters are supported via UTF-16-aligned `QTextLayout` measurement, but right-to-left (`RTL`) bidirectional paragraph layout is not yet implemented.
+- **Spell Checking**: KDE `Sonnet` inline spell-checking is not yet integrated.
+- **Translations (`i18n`)**: The UI currently ships compiled-in `English` and `German` strings (`qt-shell/src/I18n.h`); full GNU gettext `.po` / `ki18n` catalog extraction for community translations is planned.
 
 ---
 
@@ -57,11 +66,11 @@ Beta. Developed and tested on Fedora 44 with KDE Plasma 6 (KWin 6.8).
 
 ```text
 crates/
-  buffer      L0  Persistent Copy-on-Write Rope, auto-encoding (UTF-8/UTF-16/CP1252), atomic save, Undo/Redo
-  syntax      L1  Exact byte-offset CommonMark/GFM block parser, 2D table AST, inline tokenizer, HTML5 export
-  layout      L2  Single-buffer layout engine (WYSIWYG/Live/Source/TXT), 2D table grid, hit-testing, DisplayList
-  engine      L3  Multi-tab session, command registry, armed formatting, RegEx search/replace, crash recovery
-  ffi         L4  Panic-safe C ABI bridge (`kmark_ffi.h`) with cached Qt font & image dimension callbacks
+  buffer      L0  Persistent Copy-on-Write Rope, auto-encoding (UTF-8/UTF-16/CP1252), atomic symlink-safe save, Undo/Redo
+  syntax      L1  Exact byte-offset CommonMark/GFM block parser, diff-window incremental reparse, 2D table AST, HTML5 export
+  layout      L2  Modular single-buffer layout engine (context, inline, 2D table, hit-test), BlockHeightCache, DisplayList
+  engine      L3  Multi-tab session, command registry, armed formatting, RegEx search/replace, multi-tab crash recovery
+  ffi         L4  Panic-safe, poison-guarded C ABI (`kmark_ffi.h`) with single-pass QTextLayout & image callbacks
 apps/
   kmark-cli   --  Headless CLI (`info`, `outline`, `html`, `commands`, `bench`)
 qt-shell/     L5  Native C++20 Qt6 / KDE Frameworks 6 GUI (`MainWindow`, `EditorViewport`, `SettingsDialog`, `AppSettings`)
