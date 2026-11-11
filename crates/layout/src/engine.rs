@@ -258,6 +258,31 @@ impl HeightCacheConfigKey {
     }
 }
 
+const CODE_FENCE_TAG: u8 = 50;
+
+fn block_kind_tag(block: &Block) -> u8 {
+    match block.kind {
+        BlockKind::BlankLines => 0,
+        BlockKind::ThematicBreak => 1,
+        BlockKind::Heading { level, .. } => 10u8.saturating_add(level),
+        BlockKind::Paragraph { .. } => 20,
+        BlockKind::ListItem {
+            ordered, ref task, ..
+        } => 30u8
+            .saturating_add(u8::from(ordered.is_some()))
+            .saturating_add(if task.is_some() { 2 } else { 0 }),
+        BlockKind::BlockQuote { alert, .. } => 40u8.saturating_add(alert.map_or(0, |a| match a {
+            AlertKind::Note => 1,
+            AlertKind::Tip => 2,
+            AlertKind::Important => 3,
+            AlertKind::Warning => 4,
+            AlertKind::Caution => 5,
+        })),
+        BlockKind::CodeFence { .. } => CODE_FENCE_TAG,
+        BlockKind::Table(_) => 60,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct BlockContentKey {
     kind_tag: u8,
@@ -267,44 +292,38 @@ struct BlockContentKey {
 
 impl BlockContentKey {
     fn from_block(rope: &Rope, block: &Block) -> Self {
-        let kind_tag = match block.kind {
-            BlockKind::BlankLines => 0,
-            BlockKind::ThematicBreak => 1,
-            BlockKind::Heading { level, .. } => 10u8.saturating_add(level),
-            BlockKind::Paragraph { .. } => 20,
-            BlockKind::ListItem {
-                ordered, ref task, ..
-            } => 30u8
-                .saturating_add(u8::from(ordered.is_some()))
-                .saturating_add(if task.is_some() { 2 } else { 0 }),
-            BlockKind::BlockQuote { alert, .. } => {
-                40u8.saturating_add(alert.map_or(0, |a| match a {
-                    AlertKind::Note => 1,
-                    AlertKind::Tip => 2,
-                    AlertKind::Important => 3,
-                    AlertKind::Warning => 4,
-                    AlertKind::Caution => 5,
-                }))
-            }
-            BlockKind::CodeFence { .. } => 50,
-            BlockKind::Table(_) => 60,
-        };
         Self {
-            kind_tag,
+            kind_tag: block_kind_tag(block),
             byte_len: block.byte_range.len(),
             content_hash: rope.hash_byte_range(block.byte_range.clone()),
         }
     }
 }
 
-/// Persistent per-tab cache of exact measured formatted block heights so off-screen blocks
-/// retain their exact heights across scrolling and single-site edits (eliminating scroll jumps
-/// and scrollbar breathing).
+#[derive(Clone, Copy, Debug)]
+enum SlotState {
+    Unvisited,
+    Invalidated,
+    Estimated { kind_tag: u8, height: f32 },
+    Exact { kind_tag: u8, height: f32 },
+}
+
+impl SlotState {
+    const fn kind_tag(self) -> Option<u8> {
+        match self {
+            Self::Unvisited | Self::Invalidated => None,
+            Self::Estimated { kind_tag, .. } | Self::Exact { kind_tag, .. } => Some(kind_tag),
+        }
+    }
+}
+
+/// Persistent per-tab cache of formatted block heights so off-screen blocks retain their exact
+/// measured heights across scrolling and localized edits without per-frame `Rope` hashing.
 #[derive(Clone, Debug, Default)]
 pub struct BlockHeightCache {
     config_key: Option<HeightCacheConfigKey>,
     last_rope: Option<Rope>,
-    by_index: Vec<Option<f32>>,
+    by_index: Vec<SlotState>,
     by_content: std::collections::HashMap<BlockContentKey, f32>,
 }
 
@@ -324,17 +343,18 @@ impl BlockHeightCache {
     fn prepare(
         &mut self,
         rope: &Rope,
-        block_count: usize,
+        blocks: &[Block],
         prose_w: f32,
         default_line_h: f32,
         config: &LayoutConfig,
     ) {
+        let block_count = blocks.len();
         let next_cfg = HeightCacheConfigKey::from_layout(prose_w, default_line_h, config);
         if self.config_key != Some(next_cfg) {
             self.config_key = Some(next_cfg);
             self.last_rope = Some(rope.clone());
             self.by_index.clear();
-            self.by_index.resize(block_count, None);
+            self.by_index.resize(block_count, SlotState::Unvisited);
             self.by_content.clear();
             return;
         }
@@ -343,35 +363,153 @@ impl BlockHeightCache {
             .last_rope
             .as_ref()
             .is_some_and(|prev| prev.ptr_eq(rope));
-        if !same_rope || self.by_index.len() != block_count {
-            self.last_rope = Some(rope.clone());
+        if same_rope && self.by_index.len() == block_count {
+            return;
+        }
+
+        let prev_rope = self.last_rope.replace(rope.clone());
+        let Some(prev_rope) = prev_rope else {
             self.by_index.clear();
-            self.by_index.resize(block_count, None);
+            self.by_index.resize(block_count, SlotState::Unvisited);
+            return;
+        };
+
+        let Some((_old_edit, new_edit)) = prev_rope.diff_byte_range(rope) else {
+            if self.by_index.len() != block_count {
+                self.by_index.clear();
+                self.by_index.resize(block_count, SlotState::Invalidated);
+            }
+            return;
+        };
+
+        let old_len = self.by_index.len();
+        let new_start_line = rope.byte_to_line_col(new_edit.start).line;
+        let safe_before_line = new_start_line.saturating_sub(1);
+
+        // Keep prefix slots up to and including the last untouched `BlankLines` wall before `new_edit`.
+        let mut prefix_keep = blocks
+            .partition_point(|b| {
+                b.line_range.end <= safe_before_line && b.byte_range.end < new_edit.start
+            })
+            .min(old_len);
+        while prefix_keep > 0
+            && !matches!(
+                blocks[prefix_keep.saturating_sub(1)].kind,
+                BlockKind::BlankLines
+            )
+        {
+            prefix_keep = prefix_keep.saturating_sub(1);
+        }
+
+        let new_end_line = rope.byte_to_line_col(new_edit.end).line;
+        let safe_after_line = new_end_line.saturating_add(2);
+
+        // Keep suffix slots starting at the first untouched `BlankLines` wall strictly after `new_edit`.
+        let mut suffix_start_new = blocks
+            .partition_point(|b| {
+                b.line_range.start < safe_after_line || b.byte_range.start <= new_edit.end
+            })
+            .max(prefix_keep);
+        while suffix_start_new < block_count
+            && !matches!(blocks[suffix_start_new].kind, BlockKind::BlankLines)
+        {
+            suffix_start_new = suffix_start_new.saturating_add(1);
+        }
+
+        let suffix_count = block_count.saturating_sub(suffix_start_new);
+        let can_keep_suffix = old_len >= prefix_keep.saturating_add(suffix_count) && {
+            let old_suffix_start = old_len.saturating_sub(suffix_count);
+            let new_mid_has_fence = blocks[prefix_keep..suffix_start_new]
+                .iter()
+                .any(|b| matches!(b.kind, BlockKind::CodeFence { .. }));
+            let old_mid_has_fence = self.by_index[prefix_keep..old_suffix_start]
+                .iter()
+                .any(|s| s.kind_tag() == Some(CODE_FENCE_TAG));
+            !new_mid_has_fence && !old_mid_has_fence
+        };
+
+        if can_keep_suffix {
+            let old_suffix_start = old_len.saturating_sub(suffix_count);
+            let new_mid_len = suffix_start_new.saturating_sub(prefix_keep);
+            if old_suffix_start.saturating_sub(prefix_keep) == new_mid_len {
+                self.by_index[prefix_keep..old_suffix_start].fill(SlotState::Invalidated);
+            } else {
+                self.by_index.splice(
+                    prefix_keep..old_suffix_start,
+                    std::iter::repeat_n(SlotState::Invalidated, new_mid_len),
+                );
+            }
+        } else {
+            self.by_index.truncate(prefix_keep);
+            self.by_index.resize(block_count, SlotState::Invalidated);
         }
     }
 
-    fn lookup(&mut self, block_idx: usize, rope: &Rope, block: &Block) -> Option<f32> {
-        if let Some(Some(h)) = self.by_index.get(block_idx).copied() {
-            return Some(h);
+    #[allow(clippy::too_many_arguments)]
+    fn known_or_estimate(
+        &mut self,
+        block_idx: usize,
+        rope: &Rope,
+        block: &Block,
+        prose_w: f32,
+        base_font_px: f32,
+        default_line_h: f32,
+        word_wrap: bool,
+    ) -> f32 {
+        match self.by_index.get(block_idx).copied() {
+            Some(SlotState::Exact { height, .. } | SlotState::Estimated { height, .. }) => height,
+            Some(SlotState::Invalidated) => {
+                let key = BlockContentKey::from_block(rope, block);
+                if let Some(&exact_h) = self.by_content.get(&key) {
+                    if let Some(slot) = self.by_index.get_mut(block_idx) {
+                        *slot = SlotState::Exact {
+                            kind_tag: key.kind_tag,
+                            height: exact_h,
+                        };
+                    }
+                    return exact_h;
+                }
+                let est =
+                    estimate_block_height(block, prose_w, base_font_px, default_line_h, word_wrap);
+                if let Some(slot) = self.by_index.get_mut(block_idx) {
+                    *slot = SlotState::Estimated {
+                        kind_tag: key.kind_tag,
+                        height: est,
+                    };
+                }
+                est
+            }
+            Some(SlotState::Unvisited) | None => {
+                let est =
+                    estimate_block_height(block, prose_w, base_font_px, default_line_h, word_wrap);
+                if let Some(slot) = self.by_index.get_mut(block_idx) {
+                    *slot = SlotState::Estimated {
+                        kind_tag: block_kind_tag(block),
+                        height: est,
+                    };
+                }
+                est
+            }
+        }
+    }
+
+    fn record_exact(&mut self, block_idx: usize, rope: &Rope, block: &Block, height: f32) {
+        if let Some(SlotState::Exact { height: prev_h, .. }) = self.by_index.get(block_idx).copied()
+            && (prev_h - height).abs() < f32::EPSILON
+            && !self.by_content.is_empty()
+        {
+            return;
         }
         let key = BlockContentKey::from_block(rope, block);
-        if let Some(&h) = self.by_content.get(&key) {
-            if let Some(slot) = self.by_index.get_mut(block_idx) {
-                *slot = Some(h);
-            }
-            return Some(h);
-        }
-        None
-    }
-
-    fn record(&mut self, block_idx: usize, rope: &Rope, block: &Block, height: f32) {
         if let Some(slot) = self.by_index.get_mut(block_idx) {
-            *slot = Some(height);
+            *slot = SlotState::Exact {
+                kind_tag: key.kind_tag,
+                height,
+            };
         }
         if self.by_content.len() >= MAX_CACHED_BLOCK_HEIGHTS {
             self.by_content.clear();
         }
-        let key = BlockContentKey::from_block(rope, block);
         self.by_content.insert(key, height);
     }
 }
@@ -452,20 +590,14 @@ pub fn build_viewport_frame_cached(
     }
 
     if let Some(cache) = height_cache.as_deref_mut() {
-        cache.prepare(
-            req.rope,
-            req.blocks.len(),
-            prose_w,
-            default_line_h,
-            req.config,
-        );
+        cache.prepare(req.rope, req.blocks, prose_w, default_line_h, req.config);
     }
 
     // Formatted (WYSIWYG / LivePreview) block-indexed virtualized layout!
     let caret_byte = req.selection.head;
     let caret_line = req.rope.byte_to_line_col(caret_byte).line;
 
-    // Step 1: cached exact heights (or wrap-aware estimates for never-seen blocks);
+    // Step 1: cached exact heights (or cached wrap-aware estimates for unvisited blocks);
     // full layout for visible + overscan window + active caret block.
     let overscan = vh * OVERSCAN_VIEWPORT_FRAC + OVERSCAN_EXTRA_PX;
     let win_top = (req.scroll_y - overscan).max(0.0);
@@ -495,14 +627,18 @@ pub fn build_viewport_frame_cached(
         let reveal_raw = req.config.view_mode == ViewMode::LivePreview && contains_caret;
         let cacheable_formatted = !reveal_raw;
 
-        let cached_h = if cacheable_formatted {
-            height_cache
-                .as_deref_mut()
-                .and_then(|c| c.lookup(block_idx, req.rope, block))
+        let known_or_est_h = if cacheable_formatted && let Some(cache) = height_cache.as_deref_mut()
+        {
+            cache.known_or_estimate(
+                block_idx,
+                req.rope,
+                block,
+                prose_w,
+                req.config.base_font_px,
+                default_line_h,
+                req.config.word_wrap,
+            )
         } else {
-            None
-        };
-        let known_or_est_h = cached_h.unwrap_or_else(|| {
             estimate_block_height(
                 block,
                 prose_w,
@@ -510,7 +646,7 @@ pub fn build_viewport_frame_cached(
                 default_line_h,
                 req.config.word_wrap,
             )
-        });
+        };
         let near_viewport = y_cursor + known_or_est_h >= win_top && y_cursor <= win_bot;
 
         if !near_viewport && !contains_caret {
@@ -523,7 +659,7 @@ pub fn build_viewport_frame_cached(
 
         let measured_h = (y_cursor - block_start_y).max(0.0);
         if cacheable_formatted && let Some(cache) = height_cache.as_deref_mut() {
-            cache.record(block_idx, req.rope, block, measured_h);
+            cache.record_exact(block_idx, req.rope, block, measured_h);
         }
 
         // Optional Focus Mode: dim non-active blocks!

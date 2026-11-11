@@ -54,7 +54,7 @@ Verwendung:
   kmark-cli outline <datei>            Überschriften-Gliederung (H1–H6) ausgeben
   kmark-cli html <datei> [-o out.html] Eigenständiges HTML5-Dokument exportieren
   kmark-cli commands                   Alle registrierten Editor-Befehle & KDE-Shortcuts
-  kmark-cli bench                      Latenz-Benchmark auf 100.000 Zeilen (~4,5 MB)"
+  kmark-cli bench                      Latenz-Benchmark über 6.000 bis 100.000 Zeilen"
     );
 }
 
@@ -172,10 +172,18 @@ fn cmd_commands() {
     }
 }
 
-fn cmd_bench() {
-    // Build a realistic ~100,000-line Markdown document (~4.5 MB)
-    let mut doc = String::with_capacity(4_800_000);
-    for sec in 0..5_000usize {
+fn median_ms(samples: &mut [f64]) -> f64 {
+    samples.sort_by(|a, b| a.total_cmp(b));
+    samples.get(samples.len() / 2).copied().unwrap_or(0.0)
+}
+
+fn run_bench_tier(sections: usize) {
+    // Each section has 20 lines:
+    // - 300 sections   =   6,001 lines
+    // - 3,000 sections =  60,001 lines
+    // - 5,000 sections = 100,001 lines
+    let mut doc = String::with_capacity(sections.saturating_mul(960));
+    for sec in 0..sections {
         doc.push_str(&format!(
             "## Kapitel {sec} — Systemarchitektur & Typografie\n\n\
              Dies ist ein **formatierter** Absatz mit *Kursivschrift*, `Inline-Code` und einem [KDE-Link](https://kde.org).\n\
@@ -184,7 +192,11 @@ fn cmd_bench() {
              - [ ] Offene Teilaufgabe {sec}\n\n\
              | Merkmal | Status | Wert |\n\
              | --- | :---: | ---: |\n\
-             | Puffer | Aktiv | {sec} |\n\n"
+             | Puffer | Aktiv | {sec} |\n\n\
+             > [!NOTE] Hinweis {sec}\n\
+             > Zusätzliche Zeile für realistische Dokumentdichte.\n\n\
+             Normaler Abschlussabsatz für Abschnitt {sec} mit mehreren Wörtern.\n\
+             Zweite Zeile im Abschlussabsatz für gleichmäßigen Zeilenumbruch.\n\n\n\n"
         ));
     }
 
@@ -199,45 +211,68 @@ fn cmd_bench() {
 
     let mut session = Session::new_headless();
     if let Some(tab) = session.active_doc_mut() {
-        tab.rope = rope.clone();
-        tab.saved_rope = rope.clone();
-        tab.saved_revision = Some(tab.revision);
-        tab.blocks = blocks;
-        tab.outline = outline;
+        *tab = kmark_engine::DocumentTab::from_markdown_text(tab.id, "bench.md", &doc);
     }
 
     let mid_byte = rope.len_bytes() / 2;
     session.jump_to_byte_offset(mid_byte);
 
     let mut measurer = FallbackMeasurer;
-    let t2 = Instant::now();
+    let t_cold = Instant::now();
     let frame_cmds = session
         .render_viewport(1280.0, 800.0, &mut measurer)
         .map_or(0, |f| f.draw_cmds.len());
-    let layout_ms = t2.elapsed().as_secs_f64() * 1000.0;
+    let cold_frame_ms = t_cold.elapsed().as_secs_f64() * 1000.0;
 
-    // Benchmark single Rope edit + viewport frame render at mid-document
-    let t3 = Instant::now();
-    let mut rope_edit = rope.clone();
-    let aligned_mid = rope_edit.clamp_char_boundary(mid_byte);
-    rope_edit.replace_range(aligned_mid..aligned_mid, "x");
-    let rope_keystroke_us = t3.elapsed().as_secs_f64() * 1_000_000.0;
+    let iterations = 25usize;
+    let mut warm_frame_samples = Vec::with_capacity(iterations);
+    for i in 0..iterations {
+        session.set_scroll_y(18_000.0 + (i as f32) * 24.0);
+        let t = Instant::now();
+        let _ = session.render_viewport(1280.0, 800.0, &mut measurer);
+        warm_frame_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let warm_frame_median_ms = median_ms(&mut warm_frame_samples);
 
-    let t4 = Instant::now();
-    session.insert_text("a");
-    let _ = session.render_viewport(1280.0, 800.0, &mut measurer);
-    let full_cycle_ms = t4.elapsed().as_secs_f64() * 1000.0;
+    let mut rope_edit_samples = Vec::with_capacity(iterations);
+    let aligned_mid = rope.clamp_char_boundary(mid_byte);
+    for _ in 0..iterations {
+        let mut rope_edit = rope.clone();
+        let t = Instant::now();
+        rope_edit.replace_range(aligned_mid..aligned_mid, "x");
+        rope_edit_samples.push(t.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    let rope_keystroke_us = median_ms(&mut rope_edit_samples);
 
-    println!("KMark Großdokument-Benchmark");
-    println!("============================");
+    let mut full_cycle_samples = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t = Instant::now();
+        session.insert_text("a");
+        let _ = session.render_viewport(1280.0, 800.0, &mut measurer);
+        full_cycle_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let full_cycle_median_ms = median_ms(&mut full_cycle_samples);
+
     println!(
-        "Dokumentgröße:             {:.2} MiB ({} Zeilen)",
+        "--- {:>7} Zeilen ({:.2} MiB, {} Blöcke, {} Überschriften) ---",
+        rope.line_count(),
         rope.len_bytes() as f64 / (1024.0 * 1024.0),
-        rope.line_count()
+        blocks.len(),
+        outline.len()
     );
-    println!("Rope-Aufbau (O(N)):        {rope_ms:>8.2} ms");
-    println!("Vollständiger Block-Parse: {parse_ms:>8.2} ms");
-    println!("Viewport-Layout (WYSIWYG): {layout_ms:>8.2} ms ({frame_cmds} DrawCmds)");
-    println!("Rope-Einzeltaste (O(logN)):{rope_keystroke_us:>8.2} µs");
-    println!("Kompletter Tipp-Zyklus:    {full_cycle_ms:>8.2} ms");
+    println!("  Rope-Aufbau (O(N)):             {rope_ms:>8.2} ms");
+    println!("  Vollständiger Block-Parse:      {parse_ms:>8.2} ms");
+    println!("  Erster Frame (kalt, WYSIWYG):   {cold_frame_ms:>8.2} ms ({frame_cmds} DrawCmds)");
+    println!("  Scroll-Frame Median (warm):     {warm_frame_median_ms:>8.2} ms");
+    println!("  Rope-Einzeltaste Median:        {rope_keystroke_us:>8.2} µs");
+    println!("  Tipp+Layout-Zyklus Median:      {full_cycle_median_ms:>8.2} ms");
+    println!();
+}
+
+fn cmd_bench() {
+    println!("KMark Headless-Benchmark (FallbackMeasurer, Median über 25 Läufe)");
+    println!("=================================================================");
+    for sections in [300usize, 3_000, 5_000] {
+        run_bench_tier(sections);
+    }
 }

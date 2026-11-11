@@ -45,7 +45,7 @@ KMark uses a **Single-Buffer Projected Editor** architecture written in **safe R
   - Built-in **Markdown Quick Reference** (`F1`) and **Markdown Complete Reference** (`Shift+F1`).
   - Persistent **Open Recent** (`File -> Open Recent`) menu, multi-tab crash recovery (`~/.local/state/kmark/recovery/`), dockable *Outline* (`F9`) & *Folder Tree* (`F7`) with parent/home navigation and a PhpStorm-style **Select Opened File** action button, Kate-style bottom Find/Replace bar (`Ctrl+F` / `Ctrl+R`, RegEx), HTML5 export, and PDF/CUPS print preview.
 - **Fast Virtualized Editing on Large Documents**:
-  - Persistent Copy-on-Write B-tree `Rope` (`O(log N)`), exact diff-window incremental block parser, persistent `BlockHeightCache` scroll virtualization, single-pass `QTextLayout` run shaping, and cached cursor-blink frames (`< 1 ms` headless edit + layout cycle on 60,000+ lines in `kmark-cli bench` using `FallbackMeasurer`).
+  - Persistent Copy-on-Write B-tree `Rope` (`O(log N)`), exact diff-window incremental block & outline updates, persistent `BlockHeightCache` scroll virtualization, single-pass `QTextLayout` run shaping, and cached cursor-blink frames (`cargo run --release -p kmark-cli -- bench` headless `FallbackMeasurer`, 25-run medians: **~0.35 ms** edit+layout / **~0.26 ms** scroll frame at **6,000 lines**; **~0.60 ms** edit+layout / **~0.42 ms** scroll frame / **~1.3 ms** cold first frame at **60,000 lines**; **~0.86 ms** edit+layout / **~0.54 ms** scroll frame / **~1.8 ms** cold first frame at **100,000 lines**; GUI frames add cached `QTextLayout` shaping and `QPainter` drawing for visible runs only).
 
 ## Status
 

@@ -500,4 +500,97 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn cached_block_heights_stay_stable_across_mid_document_edits() {
+        let mut md = String::new();
+        let long_sentence = "Ein umgebrochener Fließtextabsatz mit **Fettschrift**, *Kursivschrift* und `Code`, dessen exakte Höhe gecacht bleibt. ";
+        for i in 0..80 {
+            md.push_str(&format!(
+                "## Kapitel {i}\n\n{}\n\n",
+                long_sentence.repeat(4)
+            ));
+        }
+
+        let mut rope = Rope::from_str(&md);
+        let mut blocks = parse_blocks(&rope);
+        let mut measurer = FallbackMeasurer;
+        let cfg = LayoutConfig::default();
+        let mut height_cache = BlockHeightCache::new();
+
+        // Measure all blocks once by scrolling top -> bottom.
+        let mut scroll_y = 0.0f32;
+        let mut full_measured_h = 0.0f32;
+        while scroll_y <= 30_000.0 {
+            let f = build_viewport_frame_cached(
+                &ViewportRequest {
+                    rope: &rope,
+                    blocks: &blocks,
+                    selection: Selection::collapsed(0),
+                    ime_preedit: None,
+                    search_matches: &[],
+                    active_match_idx: None,
+                    config: &cfg,
+                    viewport_w: 900.0,
+                    viewport_h: 640.0,
+                    scroll_y,
+                },
+                &mut measurer,
+                Some(&mut height_cache),
+            );
+            full_measured_h = f.total_height;
+            if scroll_y > f.total_height {
+                break;
+            }
+            scroll_y += 500.0;
+        }
+
+        // Edit a single character at mid-document (which does not add a wrap line) and verify
+        // off-screen prefix and suffix blocks retain their exact measured heights immediately!
+        let mid = rope.clamp_char_boundary(rope.len_bytes() / 2);
+        let old_rope = rope.clone();
+        rope.replace_range(mid..mid, "x");
+        kmark_syntax::reparse_changed_rope(&old_rope, &rope, &mut blocks);
+
+        let after_edit_frame = build_viewport_frame_cached(
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(mid + 1),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 900.0,
+                viewport_h: 640.0,
+                scroll_y: full_measured_h * 0.5,
+            },
+            &mut measurer,
+            Some(&mut height_cache),
+        );
+
+        let scrolled_top_frame = build_viewport_frame_cached(
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(mid + 1),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 900.0,
+                viewport_h: 640.0,
+                scroll_y: 0.0,
+            },
+            &mut measurer,
+            Some(&mut height_cache),
+        );
+
+        assert!(
+            (after_edit_frame.total_height - scrolled_top_frame.total_height).abs() < 0.01,
+            "total_height drifted after mid-document edit ({} vs {})",
+            after_edit_frame.total_height,
+            scrolled_top_frame.total_height
+        );
+    }
 }
