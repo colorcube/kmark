@@ -13,7 +13,7 @@ use kmark_layout::{
 use kmark_syntax::{
     AlertKind, Block, BlockKind, ColumnAlign, ImageSize, InlineTokenKind, OutlineEntry, StyleFlags,
     active_styles_at, export_html_document, extract_outline, parse_blocks, parse_inline_tokens,
-    reparse_changed_rope,
+    reparse_changed_rope, update_outline_changed_rope,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -164,8 +164,9 @@ pub struct DocumentTab {
     pub needs_scroll_to_caret: bool,
 }
 
-/// Maximum document byte size for full initial word-count scans (`reparse`).
-const MAX_FULL_WORD_COUNT_BYTES: usize = 2 * 1024 * 1024;
+/// Number of lines per slice when computing full-document word counts so multi-MiB
+/// files never allocate a single contiguous full-document `String`.
+const WORD_COUNT_BATCH_LINES: usize = 512;
 
 fn count_words_in_lines(rope: &Rope, line_range: Range<usize>) -> usize {
     let end = line_range.end.min(rope.line_count());
@@ -178,6 +179,20 @@ fn count_words_in_lines(rope: &Rope, line_range: Range<usize>) -> usize {
     rope.slice_to_string(byte_start..byte_end)
         .unicode_words()
         .count()
+}
+
+fn count_all_words_batched(rope: &Rope) -> usize {
+    let total_lines = rope.line_count();
+    let mut words = 0usize;
+    let mut start = 0usize;
+    while start < total_lines {
+        let end = start
+            .saturating_add(WORD_COUNT_BATCH_LINES)
+            .min(total_lines);
+        words = words.saturating_add(count_words_in_lines(rope, start..end));
+        start = end;
+    }
+    words
 }
 
 impl DocumentTab {
@@ -253,10 +268,7 @@ impl DocumentTab {
         self.last_frame = None;
         self.blocks = parse_blocks(&self.rope);
         self.outline = extract_outline(&self.rope, &self.blocks);
-        if self.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
-            let text = self.rope.to_string_lossless();
-            self.word_count = text.unicode_words().count();
-        }
+        self.word_count = count_all_words_batched(&self.rope);
     }
 
     #[must_use]
@@ -281,6 +293,36 @@ impl DocumentTab {
         export_html_document(&self.title, &self.rope, &self.blocks)
     }
 
+    fn apply_incremental_rope_transition(
+        &mut self,
+        old_rope: &Rope,
+        old_range: Range<usize>,
+        new_range: Range<usize>,
+    ) {
+        self.revision = self.revision.wrapping_add(1);
+        self.last_frame = None;
+        reparse_changed_rope(old_rope, &self.rope, &mut self.blocks);
+        update_outline_changed_rope(old_rope, &self.rope, &self.blocks, &mut self.outline);
+
+        let old_line_start = old_rope.byte_to_line_col(old_range.start).line;
+        let old_line_end = old_rope
+            .byte_to_line_col(old_range.end)
+            .line
+            .saturating_add(1);
+        let new_line_start = self.rope.byte_to_line_col(new_range.start).line;
+        let new_line_end = self
+            .rope
+            .byte_to_line_col(new_range.end)
+            .line
+            .saturating_add(1);
+        let old_words = count_words_in_lines(old_rope, old_line_start..old_line_end);
+        let new_words = count_words_in_lines(&self.rope, new_line_start..new_line_end);
+        self.word_count = self
+            .word_count
+            .saturating_sub(old_words)
+            .saturating_add(new_words);
+    }
+
     pub fn commit_edit(&mut self, next_rope: Rope, next_sel: Selection, group: EditGroup) {
         let clamped_sel = next_sel.clamp_to(&next_rope);
         let diff = self.rope.diff_byte_range(&next_rope);
@@ -295,28 +337,7 @@ impl DocumentTab {
         self.needs_scroll_to_caret = true;
 
         if let Some((old_range, new_range)) = diff {
-            self.revision = self.revision.wrapping_add(1);
-            self.last_frame = None;
-            reparse_changed_rope(&before_r, &self.rope, &mut self.blocks);
-            self.outline = extract_outline(&self.rope, &self.blocks);
-
-            let old_line_start = before_r.byte_to_line_col(old_range.start).line;
-            let old_line_end = before_r
-                .byte_to_line_col(old_range.end)
-                .line
-                .saturating_add(1);
-            let new_line_start = self.rope.byte_to_line_col(new_range.start).line;
-            let new_line_end = self
-                .rope
-                .byte_to_line_col(new_range.end)
-                .line
-                .saturating_add(1);
-            let old_words = count_words_in_lines(&before_r, old_line_start..old_line_end);
-            let new_words = count_words_in_lines(&self.rope, new_line_start..new_line_end);
-            self.word_count = self
-                .word_count
-                .saturating_sub(old_words)
-                .saturating_add(new_words);
+            self.apply_incremental_rope_transition(&before_r, old_range, new_range);
         }
 
         self.history
@@ -941,14 +962,10 @@ impl Session {
                 tab.armed_styles.clear();
                 if let Some((prev_rope, prev_sel)) = tab.history.undo() {
                     let old_r = std::mem::replace(&mut tab.rope, prev_rope);
-                    tab.revision = tab.revision.wrapping_add(1);
-                    tab.last_frame = None;
                     tab.selection = prev_sel.clamp_to(&tab.rope);
                     tab.needs_scroll_to_caret = true;
-                    reparse_changed_rope(&old_r, &tab.rope, &mut tab.blocks);
-                    tab.outline = extract_outline(&tab.rope, &tab.blocks);
-                    if tab.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
-                        tab.word_count = tab.rope.to_string_lossless().unicode_words().count();
+                    if let Some((old_range, new_range)) = old_r.diff_byte_range(&tab.rope) {
+                        tab.apply_incremental_rope_transition(&old_r, old_range, new_range);
                     }
                 }
             }
@@ -956,14 +973,10 @@ impl Session {
                 tab.armed_styles.clear();
                 if let Some((next_rope, next_sel)) = tab.history.redo() {
                     let old_r = std::mem::replace(&mut tab.rope, next_rope);
-                    tab.revision = tab.revision.wrapping_add(1);
-                    tab.last_frame = None;
                     tab.selection = next_sel.clamp_to(&tab.rope);
                     tab.needs_scroll_to_caret = true;
-                    reparse_changed_rope(&old_r, &tab.rope, &mut tab.blocks);
-                    tab.outline = extract_outline(&tab.rope, &tab.blocks);
-                    if tab.rope.len_bytes() <= MAX_FULL_WORD_COUNT_BYTES {
-                        tab.word_count = tab.rope.to_string_lossless().unicode_words().count();
+                    if let Some((old_range, new_range)) = old_r.diff_byte_range(&tab.rope) {
+                        tab.apply_incremental_rope_transition(&old_r, old_range, new_range);
                     }
                 }
             }

@@ -414,4 +414,73 @@ mod tests {
             "recovery directory must be empty after clean shutdown"
         );
     }
+
+    #[test]
+    fn large_document_above_2_mib_starts_with_exact_batched_word_count() {
+        // 45,000 lines × 52 bytes ≈ 2.34 MiB (> 2 MiB), 8 words per line = 360,000 words.
+        let line = "Kapitel Eins mit genau acht deutschen Wörtern hier.\n";
+        let line_count = 45_000_usize;
+        let big_md = line.repeat(line_count);
+        assert!(big_md.len() > 2 * 1024 * 1024);
+
+        let tab = DocumentTab::from_markdown_text(1, "big.md", &big_md);
+        assert_eq!(tab.word_count, line_count * 8);
+
+        let mut session = Session::new_headless();
+        *session.active_doc_mut().unwrap() = tab;
+        session.jump_to_byte_offset(0);
+        session.insert_text("Zusatzwort Eins Zwei ");
+        assert_eq!(session.active_doc().unwrap().word_count, line_count * 8 + 3);
+
+        session.execute_command(Command::Undo);
+        assert_eq!(session.active_doc().unwrap().word_count, line_count * 8);
+
+        session.execute_command(Command::Redo);
+        assert_eq!(session.active_doc().unwrap().word_count, line_count * 8 + 3);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn crash_recovery_recovers_reused_non_kmark_pid_and_spares_live_kmark_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec_dir = dir.path().join("recovery");
+
+        // 1. Draft from PID 1 (init / systemd — alive on Linux, `/proc/1/comm` != `kmark*`):
+        //    Simulates OS reusing a crashed KMark PID for a non-KMark process -> MUST recover!
+        let reused_pid_store = RecoveryStore::with_directory_and_pid(&rec_dir, 1);
+        reused_pid_store
+            .save_draft(&RecoveryDraft {
+                tab_id: 1,
+                original_path: None,
+                title: "PID Reused Draft".to_owned(),
+                content: "# Reused PID\n\nMust be recovered.".to_owned(),
+                timestamp_unix_secs: 100,
+                cursor_byte: 0,
+            })
+            .unwrap();
+
+        // 2. Draft from current test runner PID (`kmark_engine-*` -> starts with `"kmark"`):
+        //    Simulates a concurrently running live KMark window -> MUST NOT steal!
+        let live_kmark_pid = std::process::id();
+        let live_kmark_store = RecoveryStore::with_directory_and_pid(&rec_dir, live_kmark_pid);
+        live_kmark_store
+            .save_draft(&RecoveryDraft {
+                tab_id: 2,
+                original_path: None,
+                title: "Live KMark Window".to_owned(),
+                content: "# Still Open\n\nBelongs to another KMark window.".to_owned(),
+                timestamp_unix_secs: 200,
+                cursor_byte: 0,
+            })
+            .unwrap();
+
+        let observer_store = RecoveryStore::with_directory_and_pid(&rec_dir, 999_999_993);
+        let orphans = observer_store.load_orphaned_drafts();
+        assert_eq!(
+            orphans.len(),
+            1,
+            "only the non-KMark reused PID draft should be treated as orphaned"
+        );
+        assert_eq!(orphans[0].1.title, "PID Reused Draft");
+    }
 }

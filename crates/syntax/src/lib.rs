@@ -17,7 +17,9 @@ pub use inline::{
     ImageSize, InlineToken, InlineTokenKind, StyleFlags, active_styles_at, format_markdown_image,
     parse_inline_tokens,
 };
-pub use outline::{OutlineEntry, extract_outline, heading_slug, strip_inline_syntax};
+pub use outline::{
+    OutlineEntry, extract_outline, heading_slug, strip_inline_syntax, update_outline_changed_rope,
+};
 
 #[cfg(test)]
 mod tests {

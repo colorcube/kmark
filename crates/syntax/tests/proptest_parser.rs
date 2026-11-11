@@ -8,7 +8,8 @@
 
 use kmark_buffer::Rope;
 use kmark_syntax::{
-    Block, extract_outline, parse_blocks, reparse_changed_rope, reparse_changed_rope_with_min_lines,
+    Block, extract_outline, parse_blocks, reparse_changed_rope,
+    reparse_changed_rope_with_min_lines, update_outline_changed_rope,
 };
 
 #[derive(Clone, Copy)]
@@ -224,6 +225,7 @@ fn proptest_incremental_parser_matches_full_parse_with_zero_line_threshold() {
 
         let mut rope = Rope::from_str(&init);
         let mut incremental_blocks = parse_blocks(&rope);
+        let mut incremental_outline = extract_outline(&rope, &incremental_blocks);
         assert_block_invariants(&rope, &incremental_blocks, &format!("seed={seed} init"));
 
         let steps = 35 + rng.gen_range(20);
@@ -233,6 +235,12 @@ fn proptest_incremental_parser_matches_full_parse_with_zero_line_threshold() {
 
             let used_incremental =
                 reparse_changed_rope_with_min_lines(&old_rope, &rope, &mut incremental_blocks, 0);
+            update_outline_changed_rope(
+                &old_rope,
+                &rope,
+                &incremental_blocks,
+                &mut incremental_outline,
+            );
             if used_incremental {
                 incremental_hits += 1;
             }
@@ -248,7 +256,7 @@ fn proptest_incremental_parser_matches_full_parse_with_zero_line_threshold() {
                 rope.to_string_lossless()
             );
             assert_eq!(
-                extract_outline(&rope, &incremental_blocks),
+                incremental_outline,
                 extract_outline(&rope, &full_blocks),
                 "{ctx}: outline diverged"
             );
@@ -297,6 +305,7 @@ fn proptest_production_reparse_changed_rope_above_300_lines_matches_full_parse()
 
         let mut prod_blocks = parse_blocks(&rope);
         let mut probe_blocks = prod_blocks.clone();
+        let mut prod_outline = extract_outline(&rope, &prod_blocks);
 
         let steps = 25;
         for step in 0..steps {
@@ -305,6 +314,7 @@ fn proptest_production_reparse_changed_rope_above_300_lines_matches_full_parse()
 
             // Production entrypoint (`MIN_INCREMENTAL_PARSE_LINES = 300`)
             reparse_changed_rope(&old_rope, &rope, &mut prod_blocks);
+            update_outline_changed_rope(&old_rope, &rope, &prod_blocks, &mut prod_outline);
             // Instrumented probe with identical `min_lines = 300` threshold
             let used_incremental =
                 reparse_changed_rope_with_min_lines(&old_rope, &rope, &mut probe_blocks, 300);
@@ -322,7 +332,7 @@ fn proptest_production_reparse_changed_rope_above_300_lines_matches_full_parse()
                 "{ctx}: production incremental blocks diverged from full parse!"
             );
             assert_eq!(
-                extract_outline(&rope, &prod_blocks),
+                prod_outline,
                 extract_outline(&rope, &full_blocks),
                 "{ctx}: outline diverged"
             );

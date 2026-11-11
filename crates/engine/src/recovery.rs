@@ -177,7 +177,17 @@ fn parse_draft_pid(path: &Path) -> Option<u32> {
 
 #[cfg(target_os = "linux")]
 fn is_pid_alive(pid: u32) -> bool {
-    pid != 0 && Path::new(&format!("/proc/{pid}")).exists()
+    if pid == 0 {
+        return false;
+    }
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_dir.exists() {
+        return false;
+    }
+    match fs::read_to_string(proc_dir.join("comm")) {
+        Ok(comm) => comm.trim().starts_with("kmark"),
+        Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
