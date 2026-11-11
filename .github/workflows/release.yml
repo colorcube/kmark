@@ -46,17 +46,18 @@ jobs:
     name: Build .rpm (Fedora KDE / KF6 x86_64)
     runs-on: ubuntu-24.04
     container:
-      image: fedora:41
+      image: fedora:latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Fedora build & RPM dependencies
+      - name: Install Fedora build, KF6 & Rust stable toolchain
         run: |
           dnf install -y \
-            cmake gcc-c++ make rpm-build file git \
-            cargo rust \
+            cmake gcc-c++ make rpm-build file git curl ca-certificates \
             qt6-qtbase-devel \
             kf6-kxmlgui-devel kf6-kconfigwidgets-devel kf6-kcoreaddons-devel kf6-ki18n-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build .rpm package
         run: |

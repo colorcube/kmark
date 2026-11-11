@@ -139,7 +139,7 @@ Generated artifacts are placed in `dist/` (`kmark-0.1.0-linux-x86_64.tar.gz`, `.
 
 ## About the development
 
-KMark was developed with extensive help from AI. The code, the tests and the documentation were written by Google's Gemini and Anthropic's Claude under my direction. Requirements, design decisions, review and all tests are my own.
+KMark was developed with extensive help from AI. The code, the tests and the documentation were written by Google's Gemini and Anthropic's Claude under my direction. Requirements, design decisions, review and testing are my own.
 
 ## License
 
