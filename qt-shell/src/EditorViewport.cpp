@@ -29,6 +29,7 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
@@ -37,6 +38,8 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QStyleOptionButton>
+#include <QTextLayout>
+#include <QTextOption>
 #include <QUrl>
 #include <QWheelEvent>
 #include <algorithm>
@@ -111,6 +114,11 @@ EditorViewport::EditorViewport(KMarkSession* session, QWidget* parent)
         &EditorViewport::metricsCallback,
         &EditorViewport::widthCallback
     );
+    kmark_session_set_run_measurer(
+        m_session,
+        this,
+        &EditorViewport::runLayoutCallback
+    );
     kmark_session_set_image_measurer(
         m_session,
         this,
@@ -135,6 +143,7 @@ EditorViewport::EditorViewport(KMarkSession* session, QWidget* parent)
 EditorViewport::~EditorViewport() {
     if (m_session != nullptr) {
         kmark_session_set_measurer(m_session, nullptr, nullptr, nullptr);
+        kmark_session_set_run_measurer(m_session, nullptr, nullptr);
         kmark_session_set_image_measurer(m_session, nullptr, nullptr);
     }
 }
@@ -146,6 +155,7 @@ void EditorViewport::applyAppearanceSettings(const AppSettings& settings) {
     m_sansBase = settings.effectiveSansFont();
     m_monoBase = settings.effectiveMonoFont();
     m_customPalette = settings.effectivePalette(QApplication::palette());
+    m_fontCache.clear();
 
     if (m_session != nullptr) {
         kmark_session_set_palette(m_session, m_customPalette);
@@ -161,6 +171,7 @@ void EditorViewport::refreshSystemFonts() {
     if (m_useSystemMono) {
         m_monoBase = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     }
+    m_fontCache.clear();
     if (m_session != nullptr) {
         kmark_session_clear_measure_cache(m_session);
     }
@@ -178,7 +189,7 @@ void EditorViewport::refreshPalette() {
 }
 
 void EditorViewport::clearImageCache() {
-    m_pixmapCache.clear();
+    m_imageCache.clear();
     if (m_session != nullptr) {
         kmark_session_clear_measure_cache(m_session);
     }
@@ -197,6 +208,27 @@ QFont EditorViewport::makeFont(uint8_t fontRole, float sizePx, bool bold, bool i
     f.setBold(bold);
     f.setItalic(italic);
     return f;
+}
+
+const EditorViewport::CachedFontEntry& EditorViewport::cachedFont(
+    uint8_t fontRole,
+    float sizePx,
+    bool bold,
+    bool italic
+) const {
+    const int px = std::clamp(static_cast<int>(std::lround(sizePx)), 8, 256);
+    const uint32_t key = (static_cast<uint32_t>(px) << 3u)
+        | ((static_cast<uint32_t>(fontRole) & 1u) << 2u)
+        | (bold ? 2u : 0u)
+        | (italic ? 1u : 0u);
+    auto it = m_fontCache.constFind(key);
+    if (it != m_fontCache.constEnd()) {
+        return it.value();
+    }
+    if (m_fontCache.size() >= 256) {
+        m_fontCache.clear();
+    }
+    return m_fontCache.insert(key, CachedFontEntry(makeFont(fontRole, static_cast<float>(px), bold, italic))).value();
 }
 
 QString EditorViewport::activeDocumentDir() const {
@@ -231,20 +263,22 @@ QString EditorViewport::resolveImagePath(const QString& rawSrc) const {
         return {};
     }
     if (src.startsWith(QStringLiteral("file://"), Qt::CaseInsensitive)) {
-        return QUrl(src).toLocalFile();
+        const QString local = QUrl(src).toLocalFile();
+        const QFileInfo lfi(local);
+        return lfi.exists() ? lfi.canonicalFilePath() : QString();
     }
     const QFileInfo fi(src);
     if (fi.isAbsolute()) {
-        return fi.exists() ? fi.absoluteFilePath() : QString();
+        return fi.exists() ? fi.canonicalFilePath() : QString();
     }
     const QDir docDir(activeDocumentDir());
-    const QString candidate = docDir.filePath(src);
-    if (QFileInfo::exists(candidate)) {
-        return QFileInfo(candidate).absoluteFilePath();
+    const QFileInfo candidate(docDir.filePath(src));
+    if (candidate.exists()) {
+        return candidate.canonicalFilePath();
     }
-    const QString cwdCandidate = QDir::current().filePath(src);
-    if (QFileInfo::exists(cwdCandidate)) {
-        return QFileInfo(cwdCandidate).absoluteFilePath();
+    const QFileInfo cwdCandidate(QDir::current().filePath(src));
+    if (cwdCandidate.exists()) {
+        return cwdCandidate.canonicalFilePath();
     }
     return {};
 }
@@ -275,12 +309,11 @@ void EditorViewport::metricsCallback(
         return;
     }
     const auto* self = static_cast<const EditorViewport*>(userData);
-    const QFont font = self->makeFont(fontRole, sizePx, bold, italic);
-    const QFontMetricsF fm(font);
-    outMetrics->ascent = static_cast<float>(fm.ascent());
-    outMetrics->descent = static_cast<float>(fm.descent());
-    outMetrics->line_height = static_cast<float>(fm.height());
-    outMetrics->space_width = static_cast<float>(fm.horizontalAdvance(QLatin1Char(' ')));
+    const CachedFontEntry& entry = self->cachedFont(fontRole, sizePx, bold, italic);
+    outMetrics->ascent = static_cast<float>(entry.fm.ascent());
+    outMetrics->descent = static_cast<float>(entry.fm.descent());
+    outMetrics->line_height = static_cast<float>(entry.fm.height());
+    outMetrics->space_width = static_cast<float>(entry.spaceWidth);
 }
 
 float EditorViewport::widthCallback(
@@ -296,10 +329,73 @@ float EditorViewport::widthCallback(
         return 0.0f;
     }
     const auto* self = static_cast<const EditorViewport*>(userData);
-    const QFont font = self->makeFont(fontRole, sizePx, bold, italic);
-    const QFontMetricsF fm(font);
+    const CachedFontEntry& entry = self->cachedFont(fontRole, sizePx, bold, italic);
     const QString text = QString::fromUtf8(utf8Ptr, static_cast<qsizetype>(utf8Len));
-    return static_cast<float>(fm.horizontalAdvance(text));
+    return static_cast<float>(entry.fm.horizontalAdvance(text));
+}
+
+void EditorViewport::runLayoutCallback(
+    void* userData,
+    const char* utf8Ptr,
+    size_t utf8Len,
+    const uint32_t* utf16EndsPtr,
+    size_t graphemeCount,
+    uint8_t fontRole,
+    float sizePx,
+    bool bold,
+    bool italic,
+    float* outAdvancesPtr
+) {
+    if (userData == nullptr || utf8Ptr == nullptr || utf16EndsPtr == nullptr
+        || outAdvancesPtr == nullptr || utf8Len == 0 || graphemeCount == 0) {
+        return;
+    }
+    const auto* self = static_cast<const EditorViewport*>(userData);
+    const CachedFontEntry& entry = self->cachedFont(fontRole, sizePx, bold, italic);
+
+    QString qtext = QString::fromUtf8(utf8Ptr, static_cast<qsizetype>(utf8Len));
+    for (qsizetype i = 0; i < qtext.size(); ++i) {
+        const QChar ch = qtext.at(i);
+        if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r')
+            || ch.unicode() == 0x2028u || ch.unicode() == 0x2029u) {
+            qtext[i] = QLatin1Char(' ');
+        }
+    }
+
+    QTextLayout layout(qtext, entry.font);
+    QTextOption opt;
+    opt.setWrapMode(QTextOption::NoWrap);
+    opt.setTabStopDistance(std::max(4.0, entry.spaceWidth * 4.0));
+    layout.setTextOption(opt);
+
+    layout.beginLayout();
+    const QTextLine line = layout.createLine();
+    layout.endLayout();
+
+    if (!line.isValid()) {
+        float fallbackX = 0.0f;
+        qsizetype prevPos = 0;
+        for (size_t i = 0; i < graphemeCount; ++i) {
+            const qsizetype pos = std::clamp(
+                static_cast<qsizetype>(utf16EndsPtr[i]),
+                qsizetype(0),
+                qtext.size()
+            );
+            fallbackX += static_cast<float>(entry.fm.horizontalAdvance(qtext.mid(prevPos, pos - prevPos)));
+            outAdvancesPtr[i] = fallbackX;
+            prevPos = pos;
+        }
+        return;
+    }
+
+    const int maxPos = static_cast<int>(qtext.size());
+    float prevX = 0.0f;
+    for (size_t i = 0; i < graphemeCount; ++i) {
+        const int pos = std::clamp(static_cast<int>(utf16EndsPtr[i]), 0, maxPos);
+        const float x = std::max(prevX, static_cast<float>(line.cursorToX(pos, QTextLine::Leading)));
+        outAdvancesPtr[i] = x;
+        prevX = x;
+    }
 }
 
 bool EditorViewport::imageSizeCallback(
@@ -318,18 +414,42 @@ bool EditorViewport::imageSizeCallback(
     if (resolved.isEmpty()) {
         return false;
     }
-    QImageReader reader(resolved);
-    reader.setAutoTransform(true);
-    const QSize sz = reader.size();
-    if (!sz.isValid() || sz.width() <= 0 || sz.height() <= 0) {
-        const QPixmap pm(resolved);
-        if (pm.isNull()) {
-            return false;
-        }
-        *outW = static_cast<float>(pm.width());
-        *outH = static_cast<float>(pm.height());
+
+    const QFileInfo fi(resolved);
+    const qint64 mtime = fi.lastModified().toMSecsSinceEpoch();
+    const qint64 fsize = fi.size();
+
+    auto it = self->m_imageCache.find(resolved);
+    if (it != self->m_imageCache.end()
+        && it->mtimeMsec == mtime
+        && it->fileSize == fsize
+        && it->naturalSize.isValid()) {
+        *outW = static_cast<float>(it->naturalSize.width());
+        *outH = static_cast<float>(it->naturalSize.height());
         return true;
     }
+
+    QImageReader reader(resolved);
+    reader.setAutoTransform(true);
+    QSize sz = reader.size();
+    if (!sz.isValid() || sz.width() <= 0 || sz.height() <= 0) {
+        const QImage probe = reader.read();
+        if (probe.isNull()) {
+            return false;
+        }
+        sz = probe.size();
+    }
+
+    if (self->m_imageCache.size() >= 64 && it == self->m_imageCache.end()) {
+        self->m_imageCache.clear();
+    }
+    CachedImageEntry& entry = self->m_imageCache[resolved];
+    entry.mtimeMsec = mtime;
+    entry.fileSize = fsize;
+    entry.naturalSize = sz;
+    entry.decodedMaxDim = 0;
+    entry.pixmap = QPixmap();
+
     *outW = static_cast<float>(sz.width());
     *outH = static_cast<float>(sz.height());
     return true;
@@ -342,7 +462,7 @@ void EditorViewport::resetCaretBlink() {
     }
 }
 
-void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
+void EditorViewport::paintEvent(QPaintEvent* event) {
     if (m_session == nullptr) {
         return;
     }
@@ -352,12 +472,23 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
     const KMarkFrameView frame = kmark_session_render_frame(m_session, vw, vh);
 
     {
-        const QSignalBlocker blocker(verticalScrollBar());
+        QScrollBar* sb = verticalScrollBar();
         const int maxScroll = std::max(0, static_cast<int>(std::ceil(frame.total_height - vh * 0.6f)));
-        verticalScrollBar()->setRange(0, maxScroll);
-        verticalScrollBar()->setPageStep(static_cast<int>(vh));
-        verticalScrollBar()->setSingleStep(24);
-        verticalScrollBar()->setValue(static_cast<int>(std::lround(frame.scroll_y)));
+        const int pageStep = static_cast<int>(vh);
+        const int scrollVal = static_cast<int>(std::lround(frame.scroll_y));
+        if (sb->maximum() != maxScroll || sb->pageStep() != pageStep || sb->value() != scrollVal) {
+            const QSignalBlocker blocker(sb);
+            if (sb->maximum() != maxScroll || sb->minimum() != 0) {
+                sb->setRange(0, maxScroll);
+            }
+            if (sb->pageStep() != pageStep) {
+                sb->setPageStep(pageStep);
+            }
+            sb->setSingleStep(24);
+            if (sb->value() != scrollVal) {
+                sb->setValue(scrollVal);
+            }
+        }
     }
 
     m_lastCaretRect = QRectF(
@@ -367,15 +498,24 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
         std::max(14.0f, frame.caret_rect.h)
     );
 
+    const QRectF dirtyRect = (event != nullptr)
+        ? QRectF(event->rect()).adjusted(-4.0, -4.0, 4.0, 4.0)
+        : QRectF(0.0, 0.0, vw, vh);
+
     QPainter painter(viewport());
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
+
+    bool needRelayoutForModifiedImage = false;
 
     for (size_t i = 0; i < frame.cmds_len; ++i) {
         const KMarkDrawCmd& cmd = frame.cmds_ptr[i];
         switch (cmd.tag) {
             case KMARK_CMD_FILL_RECT: {
                 const QRectF r(cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h);
+                if (!r.intersects(dirtyRect)) {
+                    break;
+                }
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(toQColor(cmd.color));
                 if (cmd.aux > 0.2f) {
@@ -387,6 +527,9 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
             }
             case KMARK_CMD_STROKE_RECT: {
                 const QRectF r(cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h);
+                if (!r.adjusted(-2.0, -2.0, 2.0, 2.0).intersects(dirtyRect)) {
+                    break;
+                }
                 QPen pen(toQColor(cmd.color));
                 pen.setWidthF(std::max(1.0f, cmd.aux));
                 painter.setPen(pen);
@@ -396,6 +539,13 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
                 break;
             }
             case KMARK_CMD_LINE: {
+                const qreal minX = std::min(cmd.rect.x, cmd.rect.w) - 2.0f;
+                const qreal maxX = std::max(cmd.rect.x, cmd.rect.w) + 2.0f;
+                const qreal minY = std::min(cmd.rect.y, cmd.rect.h) - 2.0f;
+                const qreal maxY = std::max(cmd.rect.y, cmd.rect.h) + 2.0f;
+                if (!QRectF(QPointF(minX, minY), QPointF(maxX, maxY)).intersects(dirtyRect)) {
+                    break;
+                }
                 QPen pen(toQColor(cmd.color));
                 pen.setWidthF(std::max(1.0f, cmd.aux));
                 painter.setPen(pen);
@@ -412,6 +562,9 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
                 qreal curX = static_cast<qreal>(cmd.rect.x) - totalW;
                 const qreal topY = static_cast<qreal>(cmd.rect.y);
                 const qreal botY = topY + static_cast<qreal>(cmd.rect.h);
+                if (!QRectF(curX - 2.0, topY - 2.0, totalW + slant + 4.0, (botY - topY) + 4.0).intersects(dirtyRect)) {
+                    break;
+                }
 
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(toQColor(cmd.color));
@@ -428,9 +581,13 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
                 break;
             }
             case KMARK_CMD_CHECKBOX: {
+                const QRectF r(cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h);
+                if (!r.intersects(dirtyRect)) {
+                    break;
+                }
                 QStyleOptionButton opt;
                 opt.initFrom(this);
-                opt.rect = QRectF(cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h).toAlignedRect();
+                opt.rect = r.toAlignedRect();
                 opt.state = QStyle::State_Enabled | ((cmd.flags & 4u) != 0 ? QStyle::State_On : QStyle::State_Off);
                 style()->drawPrimitive(QStyle::PE_IndicatorCheckBox, &opt, &painter, this);
                 break;
@@ -439,12 +596,16 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
                 if (cmd.text_len == 0 || frame.text_pool_ptr == nullptr) {
                     break;
                 }
+                const qreal fpx = std::max(8.0f, cmd.aux);
+                if ((cmd.rect.y + fpx * 0.6) < dirtyRect.top() || (cmd.rect.y - fpx * 1.4) > dirtyRect.bottom()) {
+                    break;
+                }
                 const auto* start = reinterpret_cast<const char*>(frame.text_pool_ptr + cmd.text_offset);
                 const QString str = QString::fromUtf8(start, static_cast<qsizetype>(cmd.text_len));
                 const bool bold = (cmd.flags & 1u) != 0;
                 const bool italic = (cmd.flags & 2u) != 0;
                 m_lastFontPx = cmd.aux;
-                painter.setFont(makeFont(cmd.font_role, cmd.aux, bold, italic));
+                painter.setFont(cachedFont(cmd.font_role, cmd.aux, bold, italic).font);
                 painter.setPen(toQColor(cmd.color));
                 painter.drawText(QPointF(cmd.rect.x, cmd.rect.y), str);
                 break;
@@ -453,30 +614,74 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
                 if (cmd.text_len == 0 || frame.text_pool_ptr == nullptr) {
                     break;
                 }
+                const QRectF dest(cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h);
+                if (!dest.intersects(dirtyRect)) {
+                    break;
+                }
                 const auto* start = reinterpret_cast<const char*>(frame.text_pool_ptr + cmd.text_offset);
                 const QString rawSrc = QString::fromUtf8(start, static_cast<qsizetype>(cmd.text_len));
                 const QString resolved = resolveImagePath(rawSrc);
                 if (resolved.isEmpty()) {
                     break;
                 }
-                auto it = m_pixmapCache.find(resolved);
-                if (it == m_pixmapCache.end()) {
-                    if (m_pixmapCache.size() >= 64) {
-                        m_pixmapCache.clear();
+
+                const QFileInfo fi(resolved);
+                const qint64 mtime = fi.lastModified().toMSecsSinceEpoch();
+                const qint64 fsize = fi.size();
+                const qreal dpr = std::max(1.0, devicePixelRatioF());
+                const int targetMaxDim = std::clamp(
+                    static_cast<int>(std::ceil(std::max(dest.width(), dest.height()) * dpr)),
+                    256,
+                    2560
+                );
+
+                auto it = m_imageCache.find(resolved);
+                const bool fileChanged = (it != m_imageCache.end())
+                    && (it->mtimeMsec != mtime || it->fileSize != fsize);
+                const bool needsHigherRes = (it != m_imageCache.end())
+                    && !fileChanged
+                    && !it->pixmap.isNull()
+                    && (targetMaxDim > static_cast<int>(it->decodedMaxDim * 1.25))
+                    && it->naturalSize.isValid()
+                    && (it->decodedMaxDim < std::max(it->naturalSize.width(), it->naturalSize.height()));
+
+                if (it == m_imageCache.end() || fileChanged || it->pixmap.isNull() || needsHigherRes) {
+                    const QSize prevNat = (it != m_imageCache.end()) ? it->naturalSize : QSize();
+                    if (m_imageCache.size() >= 64 && it == m_imageCache.end()) {
+                        m_imageCache.clear();
                     }
+
                     QImageReader reader(resolved);
                     reader.setAutoTransform(true);
+                    QSize nat = reader.size();
+                    if (nat.isValid() && (nat.width() > targetMaxDim || nat.height() > targetMaxDim)) {
+                        reader.setScaledSize(nat.scaled(targetMaxDim, targetMaxDim, Qt::KeepAspectRatio));
+                    }
                     const QImage img = reader.read();
-                    it = m_pixmapCache.insert(resolved, img.isNull() ? QPixmap(resolved) : QPixmap::fromImage(img));
+                    if (!nat.isValid() && !img.isNull()) {
+                        nat = img.size();
+                    }
+
+                    CachedImageEntry entry;
+                    entry.mtimeMsec = mtime;
+                    entry.fileSize = fsize;
+                    entry.decodedMaxDim = targetMaxDim;
+                    entry.naturalSize = nat;
+                    entry.pixmap = img.isNull() ? QPixmap(resolved) : QPixmap::fromImage(img);
+                    it = m_imageCache.insert(resolved, entry);
+
+                    if (fileChanged && prevNat.isValid() && nat.isValid() && prevNat != nat) {
+                        needRelayoutForModifiedImage = true;
+                    }
                 }
-                if (!it->isNull()) {
-                    const QRectF dest(cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h);
+
+                if (!it->pixmap.isNull()) {
                     painter.save();
                     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
                     QPainterPath clip;
                     clip.addRoundedRect(dest, 4.0, 4.0);
                     painter.setClipPath(clip);
-                    painter.drawPixmap(dest, *it, QRectF(0, 0, it->width(), it->height()));
+                    painter.drawPixmap(dest, it->pixmap, QRectF(0, 0, it->pixmap.width(), it->pixmap.height()));
                     painter.restore();
                 }
                 break;
@@ -486,8 +691,16 @@ void EditorViewport::paintEvent(QPaintEvent* /*event*/) {
         }
     }
 
-    if (hasFocus() && m_caretVisible) {
-        painter.fillRect(m_lastCaretRect, QApplication::palette().color(QPalette::Text));
+    if (hasFocus() && m_caretVisible && m_lastCaretRect.intersects(dirtyRect)) {
+        const QColor caretColor = m_useSystemColors
+            ? QApplication::palette().color(QPalette::Text)
+            : toQColor(m_customPalette.caret);
+        painter.fillRect(m_lastCaretRect, caretColor);
+    }
+
+    if (needRelayoutForModifiedImage && m_session != nullptr) {
+        kmark_session_clear_measure_cache(m_session);
+        QTimer::singleShot(0, viewport(), qOverload<>(&QWidget::update));
     }
 }
 

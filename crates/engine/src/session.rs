@@ -1634,6 +1634,62 @@ impl Session {
         let mut fallback = FallbackMeasurer;
         self.render_viewport(viewport_w, viewport_h, &mut fallback)
     }
+
+    /// Captures all session/tab inputs that affect the rendered [`ViewportFrame`] so
+    /// FFI callers can skip layout recomputation on cursor-blink or expose repaints.
+    #[must_use]
+    pub fn render_state_stamp(&self) -> Option<RenderStateStamp> {
+        let tab = self.tabs.get(self.active_tab)?;
+        Some(RenderStateStamp {
+            tab_id: tab.id,
+            revision: tab.revision,
+            selection: tab.selection,
+            ime_preedit: tab.ime_preedit.clone(),
+            view_mode: tab.view_mode,
+            scroll_y_bits: tab.scroll_y.to_bits(),
+            needs_scroll_to_caret: tab.needs_scroll_to_caret,
+            search_query: self.search.query.clone(),
+            search_options: self.search.options,
+            search_match_count: self.search.matches.len(),
+            search_active_index: self.search.active_index,
+            heading_marks: self.layout_config.heading_marks,
+            base_font_bits: self.layout_config.base_font_px.to_bits(),
+            line_spacing_bits: self.layout_config.line_spacing_scale.to_bits(),
+            max_prose_width_bits: self.layout_config.max_prose_width_px.to_bits(),
+            word_wrap: self.layout_config.word_wrap,
+            show_line_numbers: self.layout_config.show_line_numbers,
+            focus_mode: self.layout_config.focus_mode,
+            typewriter_mode: self.layout_config.typewriter_mode,
+            ui_german: self.layout_config.ui_german,
+            palette: self.layout_config.palette,
+        })
+    }
+}
+
+/// Exact equality stamp covering all document, cursor, search, and theme inputs to [`Session::render_viewport`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderStateStamp {
+    pub tab_id: u64,
+    pub revision: u64,
+    pub selection: Selection,
+    pub ime_preedit: Option<String>,
+    pub view_mode: ViewMode,
+    pub scroll_y_bits: u32,
+    pub needs_scroll_to_caret: bool,
+    pub search_query: String,
+    pub search_options: SearchOptions,
+    pub search_match_count: usize,
+    pub search_active_index: Option<usize>,
+    pub heading_marks: HeadingMarkStyle,
+    pub base_font_bits: u32,
+    pub line_spacing_bits: u32,
+    pub max_prose_width_bits: u32,
+    pub word_wrap: bool,
+    pub show_line_numbers: bool,
+    pub focus_mode: bool,
+    pub typewriter_mode: bool,
+    pub ui_german: bool,
+    pub palette: kmark_layout::ThemePalette,
 }
 
 fn default_view_mode_for_path(path: &Path) -> ViewMode {

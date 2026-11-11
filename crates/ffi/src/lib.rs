@@ -7,7 +7,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
 use kmark_engine::{
-    Command, KeyCode, KeyModifiers, PointerAction, SearchOptions, Session, UiLanguage,
+    Command, KeyCode, KeyModifiers, PointerAction, RenderStateStamp, SearchOptions, Session,
+    UiLanguage,
 };
 use kmark_layout::{
     DrawCmd, FallbackMeasurer, FontMetrics, FontRole, HeadingMarkStyle, MeasuredRun, RectF, Rgba,
@@ -311,6 +312,19 @@ pub type KMarkWidthFn = extern "C" fn(
     italic: bool,
 ) -> f32;
 
+pub type KMarkRunLayoutFn = extern "C" fn(
+    user_data: *mut c_void,
+    utf8_ptr: *const c_char,
+    utf8_len: usize,
+    utf16_ends_ptr: *const u32,
+    grapheme_count: usize,
+    font_role: u8,
+    size_px: f32,
+    bold: bool,
+    italic: bool,
+    out_advances_ptr: *mut f32,
+);
+
 pub type KMarkImageSizeFn = extern "C" fn(
     user_data: *mut c_void,
     src_utf8: *const c_char,
@@ -399,16 +413,26 @@ impl StyleKey {
     }
 }
 
+const MAX_RUN_CACHE_ENTRIES: usize = 16_384;
+const MAX_CACHED_RUN_BYTES: usize = 4_096;
+const MAX_IMAGE_CACHE_ENTRIES: usize = 512;
+
 struct QtBridgeMeasurer {
     user_data: *mut c_void,
     metrics_fn: Option<KMarkMetricsFn>,
     width_fn: Option<KMarkWidthFn>,
+    run_user_data: *mut c_void,
+    run_layout_fn: Option<KMarkRunLayoutFn>,
     image_user_data: *mut c_void,
     image_fn: Option<KMarkImageSizeFn>,
     fallback: FallbackMeasurer,
     metrics_cache: HashMap<StyleKey, FontMetrics>,
     run_cache: HashMap<(StyleKey, String), MeasuredRun>,
     image_cache: HashMap<String, Option<(f32, f32)>>,
+    scratch_byte_ends: Vec<usize>,
+    scratch_utf16_ends: Vec<u32>,
+    scratch_advances: Vec<f32>,
+    epoch: u64,
 }
 
 impl Default for QtBridgeMeasurer {
@@ -417,12 +441,18 @@ impl Default for QtBridgeMeasurer {
             user_data: ptr::null_mut(),
             metrics_fn: None,
             width_fn: None,
+            run_user_data: ptr::null_mut(),
+            run_layout_fn: None,
             image_user_data: ptr::null_mut(),
             image_fn: None,
             fallback: FallbackMeasurer,
             metrics_cache: HashMap::new(),
             run_cache: HashMap::new(),
             image_cache: HashMap::new(),
+            scratch_byte_ends: Vec::new(),
+            scratch_utf16_ends: Vec::new(),
+            scratch_advances: Vec::new(),
+            epoch: 1,
         }
     }
 }
@@ -432,6 +462,7 @@ impl QtBridgeMeasurer {
         self.metrics_cache.clear();
         self.run_cache.clear();
         self.image_cache.clear();
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     fn role_code(role: FontRole) -> u8 {
@@ -484,9 +515,9 @@ impl TextMeasurer for QtBridgeMeasurer {
         bold: bool,
         italic: bool,
     ) -> MeasuredRun {
-        let Some(w_cb) = self.width_fn else {
+        if self.run_layout_fn.is_none() && self.width_fn.is_none() {
             return self.fallback.measure_run(text, role, size_px, bold, italic);
-        };
+        }
         let s_key = StyleKey::new(role, size_px, bold, italic);
         if text.is_empty() {
             let metrics = self.font_metrics(role, size_px, bold, italic);
@@ -497,44 +528,104 @@ impl TextMeasurer for QtBridgeMeasurer {
             };
         }
 
-        let cache_key = (s_key, text.to_owned());
-        if let Some(hit) = self.run_cache.get(&cache_key) {
-            return hit.clone();
-        }
-
-        if self.run_cache.len() >= 16_384 {
-            self.run_cache.clear();
+        let cacheable = text.len() <= MAX_CACHED_RUN_BYTES;
+        if cacheable {
+            let lookup_key = (s_key, text.to_owned());
+            if let Some(hit) = self.run_cache.get(&lookup_key) {
+                return hit.clone();
+            }
         }
 
         let metrics = self.font_metrics(role, size_px, bold, italic);
         let role_u8 = Self::role_code(role);
-        let mut ends = Vec::new();
-        let mut last_w = 0.0f32;
 
-        for (rel_idx, g) in text.grapheme_indices(true) {
-            let end_b = rel_idx.saturating_add(g.len());
-            if let Some(prefix) = text.get(..end_b) {
-                let w = w_cb(
-                    self.user_data,
-                    prefix.as_ptr().cast::<c_char>(),
-                    prefix.len(),
+        let run = if let Some(run_cb) = self.run_layout_fn {
+            self.scratch_byte_ends.clear();
+            self.scratch_utf16_ends.clear();
+            let mut cum_utf16 = 0u32;
+            for (rel_idx, g) in text.grapheme_indices(true) {
+                let end_b = rel_idx.saturating_add(g.len());
+                let g_utf16: u32 = g.chars().map(|ch| ch.len_utf16() as u32).sum();
+                cum_utf16 = cum_utf16.saturating_add(g_utf16);
+                self.scratch_byte_ends.push(end_b);
+                self.scratch_utf16_ends.push(cum_utf16);
+            }
+
+            let count = self.scratch_byte_ends.len();
+            self.scratch_advances.clear();
+            self.scratch_advances.resize(count, 0.0);
+
+            if count > 0 {
+                run_cb(
+                    self.run_user_data,
+                    text.as_ptr().cast::<c_char>(),
+                    text.len(),
+                    self.scratch_utf16_ends.as_ptr(),
+                    count,
                     role_u8,
                     size_px,
                     bold,
                     italic,
-                )
-                .max(last_w);
+                    self.scratch_advances.as_mut_ptr(),
+                );
+            }
+
+            let mut ends = Vec::with_capacity(count);
+            let mut last_w = 0.0f32;
+            for (&end_b, &raw_w) in self
+                .scratch_byte_ends
+                .iter()
+                .zip(self.scratch_advances.iter())
+            {
+                let w = if raw_w.is_finite() {
+                    raw_w.max(last_w)
+                } else {
+                    last_w
+                };
                 last_w = w;
                 ends.push((end_b, w));
             }
-        }
 
-        let run = MeasuredRun {
-            total_width: last_w,
-            metrics,
-            grapheme_ends: ends,
+            MeasuredRun {
+                total_width: last_w,
+                metrics,
+                grapheme_ends: ends,
+            }
+        } else if let Some(w_cb) = self.width_fn {
+            let mut ends = Vec::new();
+            let mut last_w = 0.0f32;
+            for (rel_idx, g) in text.grapheme_indices(true) {
+                let end_b = rel_idx.saturating_add(g.len());
+                if let Some(prefix) = text.get(..end_b) {
+                    let w = w_cb(
+                        self.user_data,
+                        prefix.as_ptr().cast::<c_char>(),
+                        prefix.len(),
+                        role_u8,
+                        size_px,
+                        bold,
+                        italic,
+                    )
+                    .max(last_w);
+                    last_w = w;
+                    ends.push((end_b, w));
+                }
+            }
+            MeasuredRun {
+                total_width: last_w,
+                metrics,
+                grapheme_ends: ends,
+            }
+        } else {
+            self.fallback.measure_run(text, role, size_px, bold, italic)
         };
-        self.run_cache.insert(cache_key, run.clone());
+
+        if cacheable {
+            if self.run_cache.len() >= MAX_RUN_CACHE_ENTRIES {
+                self.run_cache.clear();
+            }
+            self.run_cache.insert((s_key, text.to_owned()), run.clone());
+        }
         run
     }
 
@@ -546,7 +637,7 @@ impl TextMeasurer for QtBridgeMeasurer {
         if let Some(&cached) = self.image_cache.get(src) {
             return cached;
         }
-        if self.image_cache.len() >= 512 {
+        if self.image_cache.len() >= MAX_IMAGE_CACHE_ENTRIES {
             self.image_cache.clear();
         }
         let mut w = 0.0f32;
@@ -568,12 +659,25 @@ impl TextMeasurer for QtBridgeMeasurer {
     }
 }
 
+struct CachedRenderedFrame {
+    stamp: RenderStateStamp,
+    measurer_epoch: u64,
+    vw_bits: u32,
+    vh_bits: u32,
+    viewport_w: f32,
+    viewport_h: f32,
+    scroll_y: f32,
+    total_height: f32,
+    caret_rect: KMarkRectF,
+}
+
 pub struct KMarkSession {
     session: Session,
     measurer: QtBridgeMeasurer,
     last_error: String,
     frame_cmds: Vec<KMarkDrawCmd>,
     frame_text_pool: Vec<u8>,
+    cached_frame: Option<CachedRenderedFrame>,
     outline_items: Vec<KMarkOutlineItem>,
     outline_text_pool: Vec<u8>,
 }
@@ -604,6 +708,7 @@ pub extern "C" fn kmark_session_new() -> *mut KMarkSession {
             last_error: String::new(),
             frame_cmds: Vec::with_capacity(512),
             frame_text_pool: Vec::with_capacity(8192),
+            cached_frame: None,
             outline_items: Vec::new(),
             outline_text_pool: Vec::new(),
         }))
@@ -664,6 +769,24 @@ pub extern "C" fn kmark_session_set_measurer(
         s.measurer.metrics_fn = metrics_fn;
         s.measurer.width_fn = width_fn;
         s.measurer.clear_cache();
+        s.cached_frame = None;
+    }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_set_run_measurer(
+    session: *mut KMarkSession,
+    user_data: *mut c_void,
+    run_layout_fn: Option<KMarkRunLayoutFn>,
+) {
+    let Some(s) = (unsafe { session.as_mut() }) else {
+        return;
+    };
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        s.measurer.run_user_data = user_data;
+        s.measurer.run_layout_fn = run_layout_fn;
+        s.measurer.clear_cache();
+        s.cached_frame = None;
     }));
 }
 
@@ -680,6 +803,8 @@ pub extern "C" fn kmark_session_set_image_measurer(
         s.measurer.image_user_data = user_data;
         s.measurer.image_fn = image_fn;
         s.measurer.image_cache.clear();
+        s.measurer.epoch = s.measurer.epoch.wrapping_add(1);
+        s.cached_frame = None;
     }));
 }
 
@@ -690,6 +815,7 @@ pub extern "C" fn kmark_session_clear_measure_cache(session: *mut KMarkSession) 
     };
     let _ = catch_unwind(AssertUnwindSafe(|| {
         s.measurer.clear_cache();
+        s.cached_frame = None;
     }));
 }
 
@@ -1671,178 +1797,228 @@ pub extern "C" fn kmark_session_render_frame(
         return KMarkFrameView::default();
     };
     catch_unwind(AssertUnwindSafe(|| {
+        let vw_bits = viewport_w.to_bits();
+        let vh_bits = viewport_h.to_bits();
+
+        if let Some(pre_stamp) = s.session.render_state_stamp()
+            && !pre_stamp.needs_scroll_to_caret
+            && let Some(cached) = s.cached_frame.as_ref()
+            && cached.vw_bits == vw_bits
+            && cached.vh_bits == vh_bits
+            && cached.measurer_epoch == s.measurer.epoch
+            && cached.stamp == pre_stamp
+        {
+            return KMarkFrameView {
+                viewport_w: cached.viewport_w,
+                viewport_h: cached.viewport_h,
+                scroll_y: cached.scroll_y,
+                total_height: cached.total_height,
+                caret_rect: cached.caret_rect,
+                cmds_ptr: s.frame_cmds.as_ptr(),
+                cmds_len: s.frame_cmds.len(),
+                text_pool_ptr: s.frame_text_pool.as_ptr(),
+                text_pool_len: s.frame_text_pool.len(),
+            };
+        }
+
         s.frame_cmds.clear();
         s.frame_text_pool.clear();
+        s.measurer.image_cache.clear();
 
-        let Some(frame) = s
-            .session
-            .render_viewport(viewport_w, viewport_h, &mut s.measurer)
-        else {
-            return KMarkFrameView::default();
-        };
+        let (frame_vw, frame_vh, frame_scroll_y, frame_total_h, frame_caret) = {
+            let Some(frame) = s
+                .session
+                .render_viewport(viewport_w, viewport_h, &mut s.measurer)
+            else {
+                s.cached_frame = None;
+                return KMarkFrameView::default();
+            };
 
-        for cmd in &frame.draw_cmds {
-            match cmd {
-                DrawCmd::FillRect {
-                    rect,
-                    color,
-                    radius,
-                } => {
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 0,
-                        font_role: 0,
-                        level: 0,
-                        flags: 0,
-                        rect: (*rect).into(),
-                        aux: *radius,
-                        color: (*color).into(),
-                        text_offset: 0,
-                        text_len: 0,
-                    });
-                }
-                DrawCmd::StrokeRect {
-                    rect,
-                    color,
-                    stroke_width,
-                    radius,
-                } => {
-                    let encoded_rad = ((*radius).clamp(0.0, 60.0) * 2.0).round() as u8;
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 1,
-                        font_role: 0,
-                        level: encoded_rad,
-                        flags: 0,
-                        rect: (*rect).into(),
-                        aux: *stroke_width,
-                        color: (*color).into(),
-                        text_offset: 0,
-                        text_len: 0,
-                    });
-                }
-                DrawCmd::Line {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    color,
-                    width,
-                } => {
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 2,
-                        font_role: 0,
-                        level: 0,
-                        flags: 0,
-                        rect: KMarkRectF {
-                            x: *x1,
-                            y: *y1,
-                            w: *x2,
-                            h: *y2,
-                        },
-                        aux: *width,
-                        color: (*color).into(),
-                        text_offset: 0,
-                        text_len: 0,
-                    });
-                }
-                DrawCmd::HeadingBars {
-                    x,
-                    top_y,
-                    height,
-                    level,
-                    color,
-                } => {
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 3,
-                        font_role: 0,
-                        level: *level,
-                        flags: 0,
-                        rect: KMarkRectF {
-                            x: *x,
-                            y: *top_y,
-                            w: 0.0,
-                            h: *height,
-                        },
-                        aux: *height,
-                        color: (*color).into(),
-                        text_offset: 0,
-                        text_len: 0,
-                    });
-                }
-                DrawCmd::Checkbox { rect, checked } => {
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 4,
-                        font_role: 0,
-                        level: 0,
-                        flags: if *checked { 4 } else { 0 },
-                        rect: (*rect).into(),
-                        aux: 0.0,
-                        color: KMarkRgba::default(),
-                        text_offset: 0,
-                        text_len: 0,
-                    });
-                }
-                DrawCmd::Text {
-                    x,
-                    baseline_y,
-                    text,
-                    role,
-                    size_px,
-                    bold,
-                    italic,
-                    color,
-                } => {
-                    let off = s.frame_text_pool.len() as u32;
-                    let bytes = text.as_bytes();
-                    s.frame_text_pool.extend_from_slice(bytes);
-                    let mut flags = 0u8;
-                    if *bold {
-                        flags |= 1;
+            for cmd in &frame.draw_cmds {
+                match cmd {
+                    DrawCmd::FillRect {
+                        rect,
+                        color,
+                        radius,
+                    } => {
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 0,
+                            font_role: 0,
+                            level: 0,
+                            flags: 0,
+                            rect: (*rect).into(),
+                            aux: *radius,
+                            color: (*color).into(),
+                            text_offset: 0,
+                            text_len: 0,
+                        });
                     }
-                    if *italic {
-                        flags |= 2;
+                    DrawCmd::StrokeRect {
+                        rect,
+                        color,
+                        stroke_width,
+                        radius,
+                    } => {
+                        let encoded_rad = ((*radius).clamp(0.0, 60.0) * 2.0).round() as u8;
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 1,
+                            font_role: 0,
+                            level: encoded_rad,
+                            flags: 0,
+                            rect: (*rect).into(),
+                            aux: *stroke_width,
+                            color: (*color).into(),
+                            text_offset: 0,
+                            text_len: 0,
+                        });
                     }
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 5,
-                        font_role: QtBridgeMeasurer::role_code(*role),
-                        level: 0,
-                        flags,
-                        rect: KMarkRectF {
-                            x: *x,
-                            y: *baseline_y,
-                            w: 0.0,
-                            h: 0.0,
-                        },
-                        aux: *size_px,
-                        color: (*color).into(),
-                        text_offset: off,
-                        text_len: bytes.len() as u32,
-                    });
-                }
-                DrawCmd::Image { rect, src } => {
-                    let off = s.frame_text_pool.len() as u32;
-                    let bytes = src.as_bytes();
-                    s.frame_text_pool.extend_from_slice(bytes);
-                    s.frame_cmds.push(KMarkDrawCmd {
-                        tag: 6,
-                        font_role: 0,
-                        level: 0,
-                        flags: 0,
-                        rect: (*rect).into(),
-                        aux: 0.0,
-                        color: KMarkRgba::default(),
-                        text_offset: off,
-                        text_len: bytes.len() as u32,
-                    });
+                    DrawCmd::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                        width,
+                    } => {
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 2,
+                            font_role: 0,
+                            level: 0,
+                            flags: 0,
+                            rect: KMarkRectF {
+                                x: *x1,
+                                y: *y1,
+                                w: *x2,
+                                h: *y2,
+                            },
+                            aux: *width,
+                            color: (*color).into(),
+                            text_offset: 0,
+                            text_len: 0,
+                        });
+                    }
+                    DrawCmd::HeadingBars {
+                        x,
+                        top_y,
+                        height,
+                        level,
+                        color,
+                    } => {
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 3,
+                            font_role: 0,
+                            level: *level,
+                            flags: 0,
+                            rect: KMarkRectF {
+                                x: *x,
+                                y: *top_y,
+                                w: 0.0,
+                                h: *height,
+                            },
+                            aux: *height,
+                            color: (*color).into(),
+                            text_offset: 0,
+                            text_len: 0,
+                        });
+                    }
+                    DrawCmd::Checkbox { rect, checked } => {
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 4,
+                            font_role: 0,
+                            level: 0,
+                            flags: if *checked { 4 } else { 0 },
+                            rect: (*rect).into(),
+                            aux: 0.0,
+                            color: KMarkRgba::default(),
+                            text_offset: 0,
+                            text_len: 0,
+                        });
+                    }
+                    DrawCmd::Text {
+                        x,
+                        baseline_y,
+                        text,
+                        role,
+                        size_px,
+                        bold,
+                        italic,
+                        color,
+                    } => {
+                        let off = s.frame_text_pool.len() as u32;
+                        let bytes = text.as_bytes();
+                        s.frame_text_pool.extend_from_slice(bytes);
+                        let mut flags = 0u8;
+                        if *bold {
+                            flags |= 1;
+                        }
+                        if *italic {
+                            flags |= 2;
+                        }
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 5,
+                            font_role: QtBridgeMeasurer::role_code(*role),
+                            level: 0,
+                            flags,
+                            rect: KMarkRectF {
+                                x: *x,
+                                y: *baseline_y,
+                                w: 0.0,
+                                h: 0.0,
+                            },
+                            aux: *size_px,
+                            color: (*color).into(),
+                            text_offset: off,
+                            text_len: bytes.len() as u32,
+                        });
+                    }
+                    DrawCmd::Image { rect, src } => {
+                        let off = s.frame_text_pool.len() as u32;
+                        let bytes = src.as_bytes();
+                        s.frame_text_pool.extend_from_slice(bytes);
+                        s.frame_cmds.push(KMarkDrawCmd {
+                            tag: 6,
+                            font_role: 0,
+                            level: 0,
+                            flags: 0,
+                            rect: (*rect).into(),
+                            aux: 0.0,
+                            color: KMarkRgba::default(),
+                            text_offset: off,
+                            text_len: bytes.len() as u32,
+                        });
+                    }
                 }
             }
+
+            (
+                frame.viewport_w,
+                frame.viewport_h,
+                frame.scroll_y,
+                frame.total_height,
+                frame.caret_viewport_rect.into(),
+            )
+        };
+
+        if let Some(post_stamp) = s.session.render_state_stamp() {
+            s.cached_frame = Some(CachedRenderedFrame {
+                stamp: post_stamp,
+                measurer_epoch: s.measurer.epoch,
+                vw_bits,
+                vh_bits,
+                viewport_w: frame_vw,
+                viewport_h: frame_vh,
+                scroll_y: frame_scroll_y,
+                total_height: frame_total_h,
+                caret_rect: frame_caret,
+            });
         }
 
         KMarkFrameView {
-            viewport_w: frame.viewport_w,
-            viewport_h: frame.viewport_h,
-            scroll_y: frame.scroll_y,
-            total_height: frame.total_height,
-            caret_rect: frame.caret_viewport_rect.into(),
+            viewport_w: frame_vw,
+            viewport_h: frame_vh,
+            scroll_y: frame_scroll_y,
+            total_height: frame_total_h,
+            caret_rect: frame_caret,
             cmds_ptr: s.frame_cmds.as_ptr(),
             cmds_len: s.frame_cmds.len(),
             text_pool_ptr: s.frame_text_pool.as_ptr(),
@@ -1854,6 +2030,8 @@ pub extern "C" fn kmark_session_render_frame(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[test]
@@ -2026,6 +2204,80 @@ mod tests {
         let st_after = kmark_session_toolbar_state(ptr);
         assert!(st_after.in_table);
         assert_eq!(st_after.table_col_align, 1);
+
+        kmark_session_free(ptr);
+    }
+
+    extern "C" fn test_single_pass_run_fn(
+        user_data: *mut c_void,
+        utf8_ptr: *const c_char,
+        utf8_len: usize,
+        utf16_ends_ptr: *const u32,
+        grapheme_count: usize,
+        _font_role: u8,
+        size_px: f32,
+        _bold: bool,
+        _italic: bool,
+        out_advances_ptr: *mut f32,
+    ) {
+        let counter = unsafe { &*(user_data.cast::<AtomicUsize>()) };
+        counter.fetch_add(1, Ordering::SeqCst);
+
+        let bytes = unsafe { std::slice::from_raw_parts(utf8_ptr.cast::<u8>(), utf8_len) };
+        let text = std::str::from_utf8(bytes).expect("valid utf8");
+        let utf16_ends = unsafe { std::slice::from_raw_parts(utf16_ends_ptr, grapheme_count) };
+        let out_advances =
+            unsafe { std::slice::from_raw_parts_mut(out_advances_ptr, grapheme_count) };
+
+        let total_utf16 = text.encode_utf16().count() as u32;
+        assert_eq!(
+            utf16_ends.last().copied().unwrap_or(0),
+            total_utf16,
+            "final grapheme UTF-16 offset must equal QString UTF-16 length"
+        );
+
+        for (i, &u16_end) in utf16_ends.iter().enumerate() {
+            out_advances[i] = (u16_end as f32) * (size_px * 0.55);
+        }
+    }
+
+    #[test]
+    fn ffi_single_pass_run_measurer_handles_utf16_surrogates_and_skips_blink_relayout() {
+        let ptr = kmark_session_new();
+        assert!(!ptr.is_null());
+
+        let call_counter = AtomicUsize::new(0);
+        kmark_session_set_run_measurer(
+            ptr,
+            (&raw const call_counter).cast_mut().cast::<c_void>(),
+            Some(test_single_pass_run_fn),
+        );
+
+        // 5,000+ byte single paragraph mixing ASCII, umlauts, CJK, and 4-byte ZWJ surrogate-pair emojis
+        let chunk = "Größe 日本語 👨‍👩‍👧‍👦 Textmessung ohne O(n^2) Präfix-Schleife. ";
+        let long_para = chunk.repeat(90);
+        assert!(long_para.len() > 5_000);
+        let c_para = CString::new(long_para).expect("cstring");
+        kmark_session_insert_text(ptr, c_para.as_ptr());
+
+        let frame1 = kmark_session_render_frame(ptr, 1000.0, 700.0);
+        assert!(frame1.cmds_len > 3);
+        let calls_after_first_frame = call_counter.load(Ordering::SeqCst);
+        // Previously O(n^2) made ~5,000+ FFI calls for one paragraph; single-pass makes <= 30 (1 per wrapped line/span)!
+        assert!(
+            (1..60).contains(&calls_after_first_frame),
+            "expected single-pass O(n) run layout calls, got {calls_after_first_frame}"
+        );
+
+        // Simulating 530 ms cursor-blink repaint with identical session/viewport state:
+        // cached_frame hits in O(1) with ZERO layout/measurement FFI calls!
+        let frame2 = kmark_session_render_frame(ptr, 1000.0, 700.0);
+        assert_eq!(frame2.cmds_len, frame1.cmds_len);
+        assert_eq!(
+            call_counter.load(Ordering::SeqCst),
+            calls_after_first_frame,
+            "blink repaint must reuse cached frame without re-running layout"
+        );
 
         kmark_session_free(ptr);
     }

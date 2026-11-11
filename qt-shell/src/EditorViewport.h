@@ -2,10 +2,12 @@
 
 #include <QAbstractScrollArea>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QHash>
 #include <QPixmap>
 #include <QPoint>
 #include <QRectF>
+#include <QSize>
 #include <QString>
 #include <QTimer>
 
@@ -62,6 +64,25 @@ protected:
     bool event(QEvent* event) override;
 
 private:
+    struct CachedFontEntry {
+        QFont font;
+        QFontMetricsF fm;
+        qreal spaceWidth = 4.0;
+
+        explicit CachedFontEntry(const QFont& f)
+            : font(f)
+            , fm(f)
+            , spaceWidth(std::max(1.0, fm.horizontalAdvance(QLatin1Char(' ')))) {}
+    };
+
+    struct CachedImageEntry {
+        qint64 mtimeMsec = -1;
+        qint64 fileSize = -1;
+        int decodedMaxDim = 0;
+        QSize naturalSize;
+        QPixmap pixmap;
+    };
+
     static void metricsCallback(
         void* userData,
         uint8_t fontRole,
@@ -81,6 +102,19 @@ private:
         bool italic
     );
 
+    static void runLayoutCallback(
+        void* userData,
+        const char* utf8Ptr,
+        size_t utf8Len,
+        const uint32_t* utf16EndsPtr,
+        size_t graphemeCount,
+        uint8_t fontRole,
+        float sizePx,
+        bool bold,
+        bool italic,
+        float* outAdvancesPtr
+    );
+
     static bool imageSizeCallback(
         void* userData,
         const char* srcUtf8,
@@ -91,6 +125,7 @@ private:
 
     UiLang currentUiLang() const;
     QFont makeFont(uint8_t fontRole, float sizePx, bool bold, bool italic) const;
+    const CachedFontEntry& cachedFont(uint8_t fontRole, float sizePx, bool bold, bool italic) const;
     QString resolveImagePath(const QString& rawSrc) const;
     void resetCaretBlink();
 
@@ -133,7 +168,8 @@ private:
     float m_lastFontPx = 16.0f;
     QTimer m_caretTimer;
     bool m_caretVisible = true;
-    mutable QHash<QString, QPixmap> m_pixmapCache;
+    mutable QHash<uint32_t, CachedFontEntry> m_fontCache;
+    mutable QHash<QString, CachedImageEntry> m_imageCache;
 };
 
 } // namespace kmark

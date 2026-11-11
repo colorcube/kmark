@@ -308,6 +308,19 @@ typedef float (*KMarkWidthFn)(
     bool italic
 );
 
+typedef void (*KMarkRunLayoutFn)(
+    void* user_data,
+    const char* utf8_ptr,
+    size_t utf8_len,
+    const uint32_t* utf16_ends_ptr,
+    size_t grapheme_count,
+    uint8_t font_role,
+    float size_px,
+    bool bold,
+    bool italic,
+    float* out_advances_ptr
+);
+
 typedef bool (*KMarkImageSizeFn)(
     void* user_data,
     const char* src_utf8,
@@ -326,6 +339,11 @@ void kmark_session_set_measurer(
     void* user_data,
     KMarkMetricsFn metrics_fn,
     KMarkWidthFn width_fn
+);
+void kmark_session_set_run_measurer(
+    KMarkSession* session,
+    void* user_data,
+    KMarkRunLayoutFn run_layout_fn
 );
 void kmark_session_set_image_measurer(
     KMarkSession* session,
