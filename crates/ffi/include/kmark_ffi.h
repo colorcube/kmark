@@ -359,6 +359,13 @@ void kmark_session_set_palette(KMarkSession* session, KMarkPalette palette);
 KMarkLayoutSettings kmark_session_get_layout_settings(const KMarkSession* session);
 void kmark_session_set_layout_settings(KMarkSession* session, KMarkLayoutSettings settings);
 
+/* External disk modification states */
+enum KMarkDiskState {
+    KMARK_DISK_UNCHANGED = 0,
+    KMARK_DISK_MODIFIED  = 1,
+    KMARK_DISK_DELETED   = 2,
+};
+
 /* Multi-tab & file persistence */
 size_t kmark_session_tab_count(const KMarkSession* session);
 size_t kmark_session_active_tab(const KMarkSession* session);
@@ -369,6 +376,10 @@ size_t kmark_session_open_reference_tab(KMarkSession* session);
 void kmark_session_close_tab(KMarkSession* session, size_t idx);
 bool kmark_session_tab_is_dirty(const KMarkSession* session, size_t idx);
 bool kmark_session_tab_has_path(const KMarkSession* session, size_t idx);
+uint8_t kmark_session_tab_external_state(const KMarkSession* session, size_t idx);
+uint8_t kmark_session_check_tab_disk_state(KMarkSession* session, size_t idx);
+bool kmark_session_reload_tab(KMarkSession* session, size_t idx);
+void kmark_session_ignore_external_change(KMarkSession* session, size_t idx);
 char* kmark_session_tab_title_alloc(const KMarkSession* session, size_t idx);
 char* kmark_session_tab_path_alloc(const KMarkSession* session, size_t idx);
 bool kmark_session_open_file(KMarkSession* session, const char* path_utf8);

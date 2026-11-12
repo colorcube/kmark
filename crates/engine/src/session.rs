@@ -139,6 +139,31 @@ pub enum PointerAction {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskFileStamp {
+    pub modified: Option<SystemTime>,
+    pub len: u64,
+}
+
+impl DiskFileStamp {
+    #[must_use]
+    pub fn from_path(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExternalDiskState {
+    #[default]
+    Unchanged,
+    Modified,
+    Deleted,
+}
+
 pub struct DocumentTab {
     pub id: u64,
     pub path: Option<PathBuf>,
@@ -147,6 +172,8 @@ pub struct DocumentTab {
     pub saved_rope: Rope,
     pub revision: u64,
     pub saved_revision: Option<u64>,
+    pub disk_stamp: Option<DiskFileStamp>,
+    pub external_state: ExternalDiskState,
     pub encoding: TextEncoding,
     pub line_ending: LineEnding,
     pub view_mode: ViewMode,
@@ -212,6 +239,8 @@ impl DocumentTab {
             rope,
             revision: 0,
             saved_revision: Some(0),
+            disk_stamp: None,
+            external_state: ExternalDiskState::Unchanged,
             encoding: TextEncoding::Utf8,
             line_ending: LineEnding::Lf,
             view_mode: ViewMode::Wysiwyg,
@@ -243,6 +272,8 @@ impl DocumentTab {
             rope,
             revision: 0,
             saved_revision: Some(0),
+            disk_stamp: None,
+            external_state: ExternalDiskState::Unchanged,
             encoding: TextEncoding::Utf8,
             line_ending: LineEnding::Lf,
             view_mode: ViewMode::Wysiwyg,
@@ -273,6 +304,9 @@ impl DocumentTab {
 
     #[must_use]
     pub fn is_dirty(&self) -> bool {
+        if self.external_state == ExternalDiskState::Deleted {
+            return true;
+        }
         if self.saved_revision == Some(self.revision) || self.rope.ptr_eq(&self.saved_rope) {
             return false;
         }
@@ -483,11 +517,13 @@ impl Session {
             .position(|t| t.path.as_deref() == Some(canonical_or_given.as_path()))
         {
             self.active_tab = existing_idx;
+            let _ = self.check_tab_external_change(existing_idx);
             self.sync_search_for_active_tab();
             return Ok(existing_idx);
         }
 
         let decoded = read_file_auto(&canonical_or_given)?;
+        let disk_stamp = DiskFileStamp::from_path(&canonical_or_given);
         let title = canonical_or_given
             .file_name()
             .and_then(|s| s.to_str())
@@ -511,6 +547,8 @@ impl Session {
             rope,
             revision: 0,
             saved_revision: Some(0),
+            disk_stamp,
+            external_state: ExternalDiskState::Unchanged,
             encoding: decoded.encoding,
             line_ending: decoded.line_ending,
             view_mode,
@@ -562,6 +600,8 @@ impl Session {
         write_file_atomic(&path, &content, tab.encoding, tab.line_ending)?;
         tab.saved_rope = tab.rope.clone();
         tab.saved_revision = Some(tab.revision);
+        tab.disk_stamp = DiskFileStamp::from_path(&path);
+        tab.external_state = ExternalDiskState::Unchanged;
         self.flushed_revisions.remove(&tab.id);
         self.recovery.remove_draft(tab.id);
         Ok(())
@@ -577,12 +617,145 @@ impl Session {
         if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
             tab.title = name.to_owned();
         }
+        tab.disk_stamp = DiskFileStamp::from_path(&target);
+        tab.external_state = ExternalDiskState::Unchanged;
         tab.path = Some(target);
         tab.saved_rope = tab.rope.clone();
         tab.saved_revision = Some(tab.revision);
         self.flushed_revisions.remove(&tab.id);
         self.recovery.remove_draft(tab.id);
         Ok(())
+    }
+
+    /// Checks whether the backing file for `idx` was modified or deleted on disk by an
+    /// external program, updating and returning [`DocumentTab::external_state`].
+    pub fn check_tab_external_change(&mut self, idx: usize) -> ExternalDiskState {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return ExternalDiskState::Unchanged;
+        };
+        let Some(path) = tab.path.clone() else {
+            tab.external_state = ExternalDiskState::Unchanged;
+            return ExternalDiskState::Unchanged;
+        };
+
+        match std::fs::metadata(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                tab.external_state = ExternalDiskState::Deleted;
+                tab.saved_revision = None;
+                ExternalDiskState::Deleted
+            }
+            Err(_) => tab.external_state,
+            Ok(meta) => {
+                let now_stamp = DiskFileStamp {
+                    modified: meta.modified().ok(),
+                    len: meta.len(),
+                };
+                if tab.disk_stamp == Some(now_stamp)
+                    && tab.external_state == ExternalDiskState::Unchanged
+                {
+                    return ExternalDiskState::Unchanged;
+                }
+                let Ok(decoded) = read_file_auto(&path) else {
+                    return tab.external_state;
+                };
+                let disk_rope = Rope::from_str(&decoded.text);
+                if disk_rope == tab.saved_rope {
+                    tab.disk_stamp = Some(now_stamp);
+                    tab.external_state = ExternalDiskState::Unchanged;
+                    ExternalDiskState::Unchanged
+                } else {
+                    tab.external_state = ExternalDiskState::Modified;
+                    ExternalDiskState::Modified
+                }
+            }
+        }
+    }
+
+    /// Reloads tab `idx` from its backing file on disk while recording the previous buffer
+    /// in Undo history (`Ctrl+Z`) so accidental reloads are always reversible.
+    pub fn reload_tab(&mut self, idx: usize) -> Result<(), EngineError> {
+        let Some(path) = self.tabs.get(idx).and_then(|t| t.path.clone()) else {
+            return Err(if idx >= self.tabs.len() {
+                EngineError::InvalidTab(idx)
+            } else {
+                EngineError::MissingFilePath
+            });
+        };
+
+        let decoded = read_file_auto(&path)?;
+        let now_stamp = DiskFileStamp::from_path(&path);
+        let new_rope = Rope::from_str(&decoded.text);
+
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return Err(EngineError::InvalidTab(idx));
+        };
+
+        let clamped_sel = tab.selection.clamp_to(&new_rope);
+        if tab.rope != new_rope {
+            let before_r = tab.rope.clone();
+            let before_s = tab.selection;
+            tab.history.record(
+                before_r,
+                before_s,
+                new_rope.clone(),
+                clamped_sel,
+                EditGroup::Discrete,
+            );
+            tab.revision = tab.revision.wrapping_add(1);
+        }
+
+        tab.rope = new_rope.clone();
+        tab.saved_rope = new_rope;
+        tab.saved_revision = Some(tab.revision);
+        tab.encoding = decoded.encoding;
+        tab.line_ending = decoded.line_ending;
+        tab.disk_stamp = now_stamp;
+        tab.external_state = ExternalDiskState::Unchanged;
+        tab.selection = clamped_sel;
+        tab.preferred_x = None;
+        tab.armed_styles.clear();
+        tab.ime_preedit = None;
+        tab.reparse();
+
+        let tab_id = tab.id;
+        self.flushed_revisions.remove(&tab_id);
+        self.recovery.remove_draft(tab_id);
+        if idx == self.active_tab {
+            self.sync_search_for_active_tab();
+        }
+        Ok(())
+    }
+
+    pub fn reload_active_tab(&mut self) -> Result<(), EngineError> {
+        self.reload_tab(self.active_tab)
+    }
+
+    /// Dismisses an external-change or deletion notice on tab `idx` until the file changes
+    /// again on disk, keeping the in-memory buffer and marking it dirty relative to disk.
+    pub fn ignore_external_change(&mut self, idx: usize) {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        let Some(path) = tab.path.clone() else {
+            tab.external_state = ExternalDiskState::Unchanged;
+            return;
+        };
+
+        if let Some(now_stamp) = DiskFileStamp::from_path(&path)
+            && let Ok(decoded) = read_file_auto(&path)
+        {
+            tab.saved_rope = Rope::from_str(&decoded.text);
+            tab.disk_stamp = Some(now_stamp);
+        } else {
+            // File was deleted on disk: ensure saved_rope differs or saved_revision is None
+            // and force a synthetic saved_rope mismatch if buffer was empty.
+            if tab.rope == tab.saved_rope {
+                tab.saved_rope = Rope::from_str("\0deleted\0");
+            }
+            tab.disk_stamp = None;
+        }
+        tab.saved_revision = None;
+        tab.external_state = ExternalDiskState::Unchanged;
     }
 
     pub fn close_tab(&mut self, idx: usize) {
@@ -767,6 +940,10 @@ impl Session {
 
             let id = self.alloc_tab_id();
             let sel = Selection::collapsed(draft.cursor_byte).clamp_to(&rope);
+            let disk_stamp = draft
+                .original_path
+                .as_deref()
+                .and_then(DiskFileStamp::from_path);
             let mut tab = DocumentTab {
                 id,
                 path: draft.original_path.clone(),
@@ -775,6 +952,8 @@ impl Session {
                 rope,
                 revision: 1,
                 saved_revision: None,
+                disk_stamp,
+                external_state: ExternalDiskState::Unchanged,
                 encoding,
                 line_ending,
                 view_mode,

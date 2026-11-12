@@ -7,8 +7,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
 use kmark_engine::{
-    Command, KeyCode, KeyModifiers, LayoutOptionsUpdate, PointerAction, RenderStateStamp,
-    SearchOptions, Session, UiLanguage,
+    Command, ExternalDiskState, KeyCode, KeyModifiers, LayoutOptionsUpdate, PointerAction,
+    RenderStateStamp, SearchOptions, Session, UiLanguage,
 };
 use kmark_layout::{
     DrawCmd, FallbackMeasurer, FontMetrics, FontRole, HeadingMarkStyle, MeasuredRun, RectF, Rgba,
@@ -992,6 +992,52 @@ pub extern "C" fn kmark_session_tab_has_path(session: *const KMarkSession, idx: 
     with_session_ref(session, false, true, |s| {
         s.session.tabs().get(idx).is_some_and(|t| t.path.is_some())
     })
+}
+
+const fn encode_disk_state(state: ExternalDiskState) -> u8 {
+    match state {
+        ExternalDiskState::Unchanged => 0,
+        ExternalDiskState::Modified => 1,
+        ExternalDiskState::Deleted => 2,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_tab_external_state(session: *const KMarkSession, idx: usize) -> u8 {
+    with_session_ref(session, 0, true, |s| {
+        s.session
+            .tabs()
+            .get(idx)
+            .map_or(0, |t| encode_disk_state(t.external_state))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_check_tab_disk_state(session: *mut KMarkSession, idx: usize) -> u8 {
+    with_session_mut(session, 0, |s| {
+        encode_disk_state(s.session.check_tab_external_change(idx))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_reload_tab(session: *mut KMarkSession, idx: usize) -> bool {
+    with_session_mut(session, false, |s| match s.session.reload_tab(idx) {
+        Ok(()) => {
+            s.last_error.clear();
+            true
+        }
+        Err(err) => {
+            s.last_error = err.to_string();
+            false
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_ignore_external_change(session: *mut KMarkSession, idx: usize) {
+    with_session_mut(session, (), |s| {
+        s.session.ignore_external_change(idx);
+    });
 }
 
 #[unsafe(no_mangle)]

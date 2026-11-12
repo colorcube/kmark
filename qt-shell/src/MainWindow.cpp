@@ -8,6 +8,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -25,11 +26,13 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPen>
+#include <QPolygonF>
 #include <QPrintDialog>
 #include <QPrintPreviewDialog>
 #include <QPrinter>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -556,6 +559,29 @@ const QStringList& commonCodeLanguages() {
     return langs;
 }
 
+QIcon makeWarningBadgeIcon(bool severe) {
+    const QIcon themed = QIcon::fromTheme(
+        severe ? QStringLiteral("dialog-error") : QStringLiteral("dialog-warning")
+    );
+    if (!themed.isNull()) {
+        return themed;
+    }
+    QPixmap pm(18, 18);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QColor fill = severe ? QColor(218, 68, 83) : QColor(246, 116, 0);
+    p.setBrush(fill);
+    p.setPen(Qt::NoPen);
+    QPolygonF tri;
+    tri << QPointF(9.0, 1.8) << QPointF(16.6, 15.8) << QPointF(1.4, 15.8);
+    p.drawPolygon(tri);
+    p.setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(QPointF(9.0, 6.5), QPointF(9.0, 10.8));
+    p.drawPoint(QPointF(9.0, 13.6));
+    return QIcon(pm);
+}
+
 } // namespace
 
 MainWindow::MainWindow(UiLang initialLang, QWidget* parent)
@@ -609,6 +635,16 @@ MainWindow::MainWindow(UiLang initialLang, QWidget* parent)
         }
     );
 
+    m_diskCheckTimer.setSingleShot(true);
+    m_diskCheckTimer.setInterval(120);
+    connect(&m_diskCheckTimer, &QTimer::timeout, this, &MainWindow::checkExternalFileChanges);
+    connect(&m_fileWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString&) {
+        m_diskCheckTimer.start();
+    });
+    connect(&m_fileWatcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString&) {
+        m_diskCheckTimer.start();
+    });
+
     m_recoveryTimer.setInterval(10000);
     connect(&m_recoveryTimer, &QTimer::timeout, this, [this]() {
         if (m_session != nullptr) {
@@ -617,6 +653,7 @@ MainWindow::MainWindow(UiLang initialLang, QWidget* parent)
     });
     m_recoveryTimer.start();
 
+    syncWatchedPaths();
     syncTabBar();
     syncOutlineTree();
     syncUiState();
@@ -624,6 +661,7 @@ MainWindow::MainWindow(UiLang initialLang, QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    m_diskCheckTimer.stop();
     m_recoveryTimer.stop();
     if (m_viewport != nullptr) {
         m_viewport->detachSession();
@@ -632,6 +670,13 @@ MainWindow::~MainWindow() {
         kmark_session_free(m_session);
         m_session = nullptr;
     }
+}
+
+bool MainWindow::event(QEvent* ev) {
+    if (ev != nullptr && ev->type() == QEvent::WindowActivate && m_session != nullptr) {
+        m_diskCheckTimer.start();
+    }
+    return KMarkWindowBase::event(ev);
 }
 
 void MainWindow::openPathFromCli(const QString& path) {
@@ -688,6 +733,7 @@ void MainWindow::openPathWithBaseDir(const QString& rawPath, const QString& base
     }
     recordRecentFile(cleanAbs);
     m_viewport->clearImageCache();
+    syncWatchedPaths();
     syncTabBar();
     syncOutlineTree();
     syncUiState();
@@ -737,6 +783,7 @@ size_t MainWindow::restoreCrashDrafts() {
     }
     const size_t recovered = kmark_session_recover_drafts(m_session);
     if (recovered > 0) {
+        syncWatchedPaths();
         syncTabBar();
         syncOutlineTree();
         syncUiState();
@@ -770,18 +817,76 @@ void MainWindow::setupCentralArea() {
             return;
         }
         kmark_session_set_active_tab(m_session, static_cast<size_t>(index));
+        kmark_session_check_tab_disk_state(m_session, static_cast<size_t>(index));
         m_viewport->clearImageCache();
         syncOutlineTree();
+        syncUiState();
         m_viewport->notifyDocumentChanged();
     });
 
     connect(m_tabBar, &QTabBar::tabCloseRequested, this, [this](int index) {
         if (index >= 0 && confirmCloseTab(static_cast<size_t>(index))) {
             kmark_session_close_tab(m_session, static_cast<size_t>(index));
+            syncWatchedPaths();
             syncTabBar();
             syncOutlineTree();
+            syncUiState();
             m_viewport->notifyDocumentChanged();
         }
+    });
+
+    /* Kate-style non-modal inline notification banner for external file modifications */
+    m_externalChangeBar = new QFrame(container);
+    m_externalChangeBar->setObjectName(QStringLiteral("ExternalChangeBar"));
+    auto* extRow = new QHBoxLayout(m_externalChangeBar);
+    extRow->setContentsMargins(10, 6, 10, 6);
+    extRow->setSpacing(8);
+
+    m_externalChangeIcon = new QLabel(m_externalChangeBar);
+    m_externalChangeIcon->setFixedSize(18, 18);
+    extRow->addWidget(m_externalChangeIcon);
+
+    m_externalChangeLabel = new QLabel(m_externalChangeBar);
+    m_externalChangeLabel->setWordWrap(true);
+    extRow->addWidget(m_externalChangeLabel, 1);
+
+    m_btnExternalReload = new QPushButton(
+        QIcon::fromTheme(QStringLiteral("view-refresh")),
+        QString(),
+        m_externalChangeBar
+    );
+    m_btnExternalSave = new QPushButton(
+        QIcon::fromTheme(QStringLiteral("document-save")),
+        QString(),
+        m_externalChangeBar
+    );
+    m_btnExternalIgnore = new QPushButton(
+        QIcon::fromTheme(QStringLiteral("dialog-cancel")),
+        QString(),
+        m_externalChangeBar
+    );
+
+    extRow->addWidget(m_btnExternalReload);
+    extRow->addWidget(m_btnExternalSave);
+    extRow->addWidget(m_btnExternalIgnore);
+    m_externalChangeBar->hide();
+
+    connect(m_btnExternalReload, &QPushButton::clicked, this, [this]() {
+        actionReloadFromDisk(true);
+    });
+    connect(m_btnExternalSave, &QPushButton::clicked, this, [this]() {
+        actionSave();
+    });
+    connect(m_btnExternalIgnore, &QPushButton::clicked, this, [this]() {
+        if (m_session == nullptr) {
+            return;
+        }
+        const size_t active = kmark_session_active_tab(m_session);
+        kmark_session_ignore_external_change(m_session, active);
+        syncWatchedPaths();
+        syncTabBar();
+        syncUiState();
+        m_viewport->setFocus();
     });
 
     m_viewport = new EditorViewport(m_session, container);
@@ -869,6 +974,7 @@ void MainWindow::setupCentralArea() {
     connect(m_btnCloseFind, &QToolButton::clicked, this, &MainWindow::hideFindBar);
 
     layout->addWidget(m_tabBar);
+    layout->addWidget(m_externalChangeBar);
     layout->addWidget(m_viewport, 1);
     layout->addWidget(m_findBar);
     setCentralWidget(container);
@@ -1043,6 +1149,10 @@ void MainWindow::setupMenusAndToolbars() {
     m_actSaveAs->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+S")));
     connect(m_actSaveAs, &QAction::triggered, this, &MainWindow::actionSaveAs);
 
+    m_actReload = m_fileMenu->addAction(icon("view-refresh"), QString());
+    m_actReload->setShortcut(QKeySequence::Refresh);
+    connect(m_actReload, &QAction::triggered, this, [this]() { actionReloadFromDisk(false); });
+
     m_actExportHtml = m_fileMenu->addAction(icon("text-html"), QString());
     connect(m_actExportHtml, &QAction::triggered, this, &MainWindow::actionExportHtml);
 
@@ -1063,8 +1173,10 @@ void MainWindow::setupMenusAndToolbars() {
         const size_t active = kmark_session_active_tab(m_session);
         if (confirmCloseTab(active)) {
             kmark_session_close_tab(m_session, active);
+            syncWatchedPaths();
             syncTabBar();
             syncOutlineTree();
+            syncUiState();
             m_viewport->notifyDocumentChanged();
         }
     });
@@ -1543,6 +1655,7 @@ void MainWindow::retranslateUi() {
     rebuildRecentFilesMenu();
     m_actSave->setText(T("&Save", "&Speichern"));
     m_actSaveAs->setText(T("Save &As…", "Speichern &unter…"));
+    m_actReload->setText(T("Re&load from Disk", "Neu &laden"));
     m_actExportHtml->setText(T("Export as &HTML5…", "Als &HTML5 exportieren…"));
     m_actPrintPreview->setText(T("Print Pre&view…", "Druck&vorschau…"));
     m_actPrint->setText(T("&Print…", "&Drucken…"));
@@ -1654,6 +1767,8 @@ void MainWindow::retranslateUi() {
     m_btnModeLive->setText(T("Live", "Live"));
     m_btnModeSource->setText(T("Source", "Quelltext"));
     m_btnModePlain->setText(T("TXT", "TXT"));
+
+    updateExternalChangeBanner();
 
     m_updatingUi = false;
 }
@@ -1775,20 +1890,32 @@ void MainWindow::syncUiState() {
         }
     }
 
-    /* Update active tab title dirty marker (`*`) & window title */
+    /* Update active tab title dirty marker (`*`), warning badge & window title */
     const size_t active = kmark_session_active_tab(m_session);
+    const uint8_t activeExt = kmark_session_tab_external_state(m_session, active);
     if (static_cast<int>(active) < m_tabBar->count()) {
         QString title = takeFfiString(kmark_session_tab_title_alloc(m_session, active));
         if (st.is_dirty) {
             title.append(QStringLiteral(" *"));
         }
         m_tabBar->setTabText(static_cast<int>(active), title);
+        if (activeExt != KMARK_DISK_UNCHANGED) {
+            const bool severe = (activeExt == KMARK_DISK_DELETED) || st.is_dirty;
+            m_tabBar->setTabIcon(static_cast<int>(active), makeWarningBadgeIcon(severe));
+        } else {
+            m_tabBar->setTabIcon(static_cast<int>(active), QIcon());
+        }
         setWindowTitle(QStringLiteral("%1 — KMark").arg(title));
     }
 
-    if (m_btnRevealActiveFile != nullptr) {
-        m_btnRevealActiveFile->setEnabled(kmark_session_tab_has_path(m_session, active));
+    const bool hasPath = kmark_session_tab_has_path(m_session, active);
+    if (m_actReload != nullptr) {
+        m_actReload->setEnabled(hasPath);
     }
+    if (m_btnRevealActiveFile != nullptr) {
+        m_btnRevealActiveFile->setEnabled(hasPath);
+    }
+    updateExternalChangeBanner();
     refreshToolbarIcons();
 
     m_updatingUi = false;
@@ -1802,10 +1929,16 @@ void MainWindow::syncTabBar() {
     const size_t count = kmark_session_tab_count(m_session);
     for (size_t i = 0; i < count; ++i) {
         QString title = takeFfiString(kmark_session_tab_title_alloc(m_session, i));
-        if (kmark_session_tab_is_dirty(m_session, i)) {
+        const bool dirty = kmark_session_tab_is_dirty(m_session, i);
+        if (dirty) {
             title.append(QStringLiteral(" *"));
         }
         const int idx = m_tabBar->addTab(title);
+        const uint8_t ext = kmark_session_tab_external_state(m_session, i);
+        if (ext != KMARK_DISK_UNCHANGED) {
+            const bool severe = (ext == KMARK_DISK_DELETED) || dirty;
+            m_tabBar->setTabIcon(idx, makeWarningBadgeIcon(severe));
+        }
         const QString fullPath = takeFfiString(kmark_session_tab_path_alloc(m_session, i));
         if (!fullPath.isEmpty()) {
             m_tabBar->setTabToolTip(idx, fullPath);
@@ -1857,6 +1990,7 @@ void MainWindow::actionNewTab() {
     kmark_session_new_tab(m_session);
     syncTabBar();
     syncOutlineTree();
+    syncUiState();
     m_viewport->notifyDocumentChanged();
     m_viewport->setFocus();
 }
@@ -1888,16 +2022,246 @@ void MainWindow::actionOpenFolder() {
     }
 }
 
+void MainWindow::actionReloadFromDisk(bool skipDirtyConfirm) {
+    if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+        return;
+    }
+    const size_t active = kmark_session_active_tab(m_session);
+    if (!kmark_session_tab_has_path(m_session, active)) {
+        return;
+    }
+
+    if (!skipDirtyConfirm && kmark_session_tab_is_dirty(m_session, active)) {
+        const QString title = takeFfiString(kmark_session_tab_title_alloc(m_session, active));
+        const auto choice = QMessageBox::question(
+            this,
+            T("Reload from Disk", "Von Datenträger neu laden"),
+            T(
+                "Reload \"%1\" from disk and replace unsaved changes?\n(You can still undo with Ctrl+Z.)",
+                "„%1“ vom Datenträger neu laden und ungespeicherte Änderungen ersetzen?\n(Mit Strg+Z weiterhin rückgängig machbar.)"
+            ).arg(title),
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel
+        );
+        if (choice != QMessageBox::Yes) {
+            return;
+        }
+    }
+
+    const QString tabPath = takeFfiString(kmark_session_tab_path_alloc(m_session, active));
+    if (!kmark_session_reload_tab(m_session, active)) {
+        const QString err = takeFfiString(kmark_session_last_error_alloc(m_session));
+        QMessageBox::warning(
+            this,
+            T("Reload Failed", "Neu laden fehlgeschlagen"),
+            err
+        );
+        kmark_session_check_tab_disk_state(m_session, active);
+        syncWatchedPaths();
+        syncTabBar();
+        syncUiState();
+        return;
+    }
+
+    if (!tabPath.isEmpty()) {
+        m_fileWatcher.removePath(tabPath);
+    }
+    m_viewport->clearImageCache();
+    syncWatchedPaths();
+    syncTabBar();
+    syncOutlineTree();
+    syncUiState();
+    m_viewport->notifyDocumentChanged();
+    m_viewport->setFocus();
+    statusBar()->showMessage(
+        T("Reloaded from disk (Ctrl+Z to undo).", "Vom Datenträger neu geladen (Strg+Z macht rückgängig)."),
+        4000
+    );
+}
+
+void MainWindow::syncWatchedPaths() {
+    if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+        return;
+    }
+
+    QSet<QString> desiredFiles;
+    QSet<QString> desiredDirs;
+
+    const size_t count = kmark_session_tab_count(m_session);
+    for (size_t i = 0; i < count; ++i) {
+        const QString p = takeFfiString(kmark_session_tab_path_alloc(m_session, i));
+        if (p.isEmpty()) {
+            continue;
+        }
+        const QFileInfo fi(p);
+        const QString absFile = fi.absoluteFilePath();
+        if (QFileInfo::exists(absFile)) {
+            desiredFiles.insert(absFile);
+        }
+        const QString parentDir = fi.absolutePath();
+        if (!parentDir.isEmpty() && QFileInfo::exists(parentDir)) {
+            desiredDirs.insert(parentDir);
+        }
+    }
+
+    const QStringList curFiles = m_fileWatcher.files();
+    const QSet<QString> curFileSet(curFiles.begin(), curFiles.end());
+    QStringList filesToRemove;
+    for (const QString& p : curFileSet) {
+        if (!desiredFiles.contains(p)) {
+            filesToRemove.push_back(p);
+        }
+    }
+    if (!filesToRemove.isEmpty()) {
+        m_fileWatcher.removePaths(filesToRemove);
+    }
+    QStringList filesToAdd;
+    for (const QString& p : desiredFiles) {
+        if (!curFileSet.contains(p)) {
+            filesToAdd.push_back(p);
+        }
+    }
+    if (!filesToAdd.isEmpty()) {
+        m_fileWatcher.addPaths(filesToAdd);
+    }
+
+    const QStringList curDirs = m_fileWatcher.directories();
+    const QSet<QString> curDirSet(curDirs.begin(), curDirs.end());
+    QStringList dirsToRemove;
+    for (const QString& d : curDirSet) {
+        if (!desiredDirs.contains(d)) {
+            dirsToRemove.push_back(d);
+        }
+    }
+    if (!dirsToRemove.isEmpty()) {
+        m_fileWatcher.removePaths(dirsToRemove);
+    }
+    QStringList dirsToAdd;
+    for (const QString& d : desiredDirs) {
+        if (!curDirSet.contains(d)) {
+            dirsToAdd.push_back(d);
+        }
+    }
+    if (!dirsToAdd.isEmpty()) {
+        m_fileWatcher.addPaths(dirsToAdd);
+    }
+}
+
+void MainWindow::checkExternalFileChanges() {
+    if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+        return;
+    }
+
+    bool anyChanged = false;
+    QStringList rebindPaths;
+    const size_t count = kmark_session_tab_count(m_session);
+    for (size_t i = 0; i < count; ++i) {
+        const uint8_t before = kmark_session_tab_external_state(m_session, i);
+        const uint8_t after = kmark_session_check_tab_disk_state(m_session, i);
+        if (before != after) {
+            anyChanged = true;
+            const QString p = takeFfiString(kmark_session_tab_path_alloc(m_session, i));
+            if (!p.isEmpty()) {
+                rebindPaths.push_back(QFileInfo(p).absoluteFilePath());
+            }
+        }
+    }
+
+    if (!rebindPaths.isEmpty()) {
+        m_fileWatcher.removePaths(rebindPaths);
+    }
+    syncWatchedPaths();
+
+    if (anyChanged) {
+        syncTabBar();
+        syncUiState();
+    }
+}
+
+void MainWindow::updateExternalChangeBanner() {
+    if (m_externalChangeBar == nullptr || m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+        return;
+    }
+
+    const size_t active = kmark_session_active_tab(m_session);
+    const uint8_t ext = kmark_session_tab_external_state(m_session, active);
+    if (ext == KMARK_DISK_UNCHANGED) {
+        m_externalChangeBar->hide();
+        return;
+    }
+
+    const bool dirty = kmark_session_tab_is_dirty(m_session, active);
+    const bool severe = (ext == KMARK_DISK_DELETED) || dirty;
+    const bool dark = palette().color(QPalette::Window).lightness() < 128;
+
+    const QString borderHex = severe ? QStringLiteral("#da4453") : QStringLiteral("#f67400");
+    const QString bgRgba = severe
+        ? (dark ? QStringLiteral("rgba(218, 68, 83, 44)") : QStringLiteral("rgba(218, 68, 83, 28)"))
+        : (dark ? QStringLiteral("rgba(246, 116, 0, 44)") : QStringLiteral("rgba(246, 116, 0, 28)"));
+
+    m_externalChangeBar->setStyleSheet(
+        QStringLiteral(
+            "#ExternalChangeBar {"
+            " background-color: %1;"
+            " border-bottom: 2px solid %2;"
+            "}"
+        ).arg(bgRgba, borderHex)
+    );
+    m_externalChangeIcon->setPixmap(makeWarningBadgeIcon(severe).pixmap(18, 18));
+
+    const QString tabTitle = takeFfiString(kmark_session_tab_title_alloc(m_session, active));
+    if (ext == KMARK_DISK_DELETED) {
+        m_externalChangeLabel->setText(
+            T(
+                "The file \"%1\" was deleted or moved on disk.",
+                "Die Datei „%1“ wurde auf dem Datenträger gelöscht oder verschoben."
+            ).arg(tabTitle)
+        );
+        m_btnExternalReload->setVisible(false);
+        m_btnExternalSave->setText(T("Save Again", "Erneut speichern"));
+        m_btnExternalIgnore->setText(T("Ignore", "Ignorieren"));
+    } else if (dirty) {
+        m_externalChangeLabel->setText(
+            T(
+                "Conflict: \"%1\" was modified on disk and also has unsaved changes in KMark.",
+                "Konflikt: „%1“ wurde extern geändert und enthält gleichzeitig ungespeicherte Änderungen."
+            ).arg(tabTitle)
+        );
+        m_btnExternalReload->setVisible(true);
+        m_btnExternalReload->setText(T("Reload (Ctrl+Z Undo)", "Neu laden (Strg+Z möglich)"));
+        m_btnExternalSave->setText(T("Overwrite", "Überschreiben"));
+        m_btnExternalIgnore->setText(T("Ignore", "Ignorieren"));
+    } else {
+        m_externalChangeLabel->setText(
+            T(
+                "The file \"%1\" was modified by another program on disk.",
+                "Die Datei „%1“ wurde extern auf dem Datenträger geändert."
+            ).arg(tabTitle)
+        );
+        m_btnExternalReload->setVisible(true);
+        m_btnExternalReload->setText(T("Reload", "Neu laden"));
+        m_btnExternalSave->setText(T("Overwrite", "Überschreiben"));
+        m_btnExternalIgnore->setText(T("Ignore", "Ignorieren"));
+    }
+
+    m_externalChangeBar->show();
+}
+
 bool MainWindow::actionSave() {
     const size_t active = kmark_session_active_tab(m_session);
     if (!kmark_session_tab_has_path(m_session, active)) {
         return actionSaveAs();
     }
+    const QString tabPath = takeFfiString(kmark_session_tab_path_alloc(m_session, active));
     if (!kmark_session_save_active(m_session)) {
         const QString err = takeFfiString(kmark_session_last_error_alloc(m_session));
         QMessageBox::critical(this, T("Save Failed", "Speichern fehlgeschlagen"), err);
         return false;
     }
+    if (!tabPath.isEmpty()) {
+        m_fileWatcher.removePath(QFileInfo(tabPath).absoluteFilePath());
+    }
+    syncWatchedPaths();
     syncTabBar();
     syncUiState();
     statusBar()->showMessage(T("Document saved.", "Dokument gespeichert."), 3000);
@@ -1925,6 +2289,8 @@ bool MainWindow::actionSaveAs() {
         return false;
     }
     recordRecentFile(absSaved);
+    m_fileWatcher.removePath(absSaved);
+    syncWatchedPaths();
     m_viewport->clearImageCache();
     syncTabBar();
     syncUiState();

@@ -13,6 +13,8 @@ using KMarkWindowBase = QMainWindow;
 #include <QComboBox>
 #include <QDockWidget>
 #include <QFileSystemModel>
+#include <QFileSystemWatcher>
+#include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -54,6 +56,7 @@ public:
     UiLang uiLanguage() const { return m_lang; }
 
 protected:
+    bool event(QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
 
 private:
@@ -82,12 +85,17 @@ private:
     void actionNewTab();
     void actionOpenFile();
     void actionOpenFolder();
+    void actionReloadFromDisk(bool skipDirtyConfirm = false);
     bool actionSave();
     bool actionSaveAs();
     void actionExportHtml();
     void actionPrintPreview();
     void actionPrint();
     bool confirmCloseTab(size_t tabIdx);
+
+    void syncWatchedPaths();
+    void checkExternalFileChanges();
+    void updateExternalChangeBanner();
 
     void promptInsertLink();
     void promptInsertImage();
@@ -115,6 +123,14 @@ private:
     KMarkSession* m_session = nullptr;
     EditorViewport* m_viewport = nullptr;
     QTabBar* m_tabBar = nullptr;
+
+    /* Kate-style top inline External File Modification banner */
+    QFrame* m_externalChangeBar = nullptr;
+    QLabel* m_externalChangeIcon = nullptr;
+    QLabel* m_externalChangeLabel = nullptr;
+    QPushButton* m_btnExternalReload = nullptr;
+    QPushButton* m_btnExternalSave = nullptr;
+    QPushButton* m_btnExternalIgnore = nullptr;
 
     /* Kate-style bottom inline Find & Replace bar */
     QWidget* m_findBar = nullptr;
@@ -165,6 +181,7 @@ private:
     QAction* m_actNew = nullptr;
     QAction* m_actOpen = nullptr;
     QAction* m_actOpenFolder = nullptr;
+    QAction* m_actReload = nullptr;
     QAction* m_actSave = nullptr;
     QAction* m_actSaveAs = nullptr;
     QAction* m_actExportHtml = nullptr;
@@ -250,6 +267,8 @@ private:
     QLabel* m_statusCounts = nullptr;
     QLabel* m_statusMode = nullptr;
 
+    QFileSystemWatcher m_fileWatcher;
+    QTimer m_diskCheckTimer;
     QTimer m_recoveryTimer;
     int m_lastIconLightness = -1;
     bool m_updatingUi = false;

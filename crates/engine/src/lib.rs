@@ -17,8 +17,8 @@ pub use reference::{MARKDOWN_REFERENCE_DE, MARKDOWN_REFERENCE_EN};
 pub use sample::{MARKDOWN_GUIDE_DE, MARKDOWN_GUIDE_EN, UiLanguage};
 pub use search::{SearchOptions, SearchState};
 pub use session::{
-    ActiveToolbarState, DocumentTab, EngineError, ImageAtPoint, LayoutOptionsUpdate, PointerAction,
-    RenderStateStamp, Session,
+    ActiveToolbarState, DocumentTab, EngineError, ExternalDiskState, ImageAtPoint,
+    LayoutOptionsUpdate, PointerAction, RenderStateStamp, Session,
 };
 
 #[cfg(test)]
@@ -523,5 +523,99 @@ mod tests {
         let idx_after_dirty = dirty_guide_session.open_file(&file_a).unwrap();
         assert_eq!(idx_after_dirty, 1);
         assert_eq!(dirty_guide_session.tab_count(), 2);
+    }
+
+    #[test]
+    fn external_file_change_detection_reload_undo_ignore_and_deletion_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("watched.md");
+        std::fs::write(&file, "# Version 1\n\nUrsprünglicher Text.\n").unwrap();
+
+        let mut session = Session::new_headless();
+        let idx = session.open_file(&file).unwrap();
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Unchanged
+        );
+
+        // 1. Re-writing identical content on disk must NOT trigger a false-positive banner.
+        std::fs::write(&file, "# Version 1\n\nUrsprünglicher Text.\n").unwrap();
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Unchanged
+        );
+
+        // 2. External modification on disk + local unsaved edit -> Modified conflict;
+        //    reloading loads disk content while keeping local edit reachable via Undo!
+        session.jump_to_byte_offset(session.active_doc().unwrap().rope.len_bytes());
+        session.insert_text("\nLokaler Entwurf.\n");
+        assert!(session.active_doc().unwrap().is_dirty());
+
+        std::fs::write(&file, "# Version 2\n\nExtern aktualisiert.\n").unwrap();
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Modified
+        );
+
+        session.reload_tab(idx).unwrap();
+        assert_eq!(
+            session.active_doc().unwrap().external_state,
+            ExternalDiskState::Unchanged
+        );
+        assert!(!session.active_doc().unwrap().is_dirty());
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "# Version 2\n\nExtern aktualisiert.\n"
+        );
+
+        // Pressing Ctrl+Z (Undo) restores the pre-reload local draft!
+        session.execute_command(Command::Undo);
+        assert!(
+            session
+                .active_doc()
+                .unwrap()
+                .rope
+                .to_string_lossless()
+                .contains("Lokaler Entwurf.")
+        );
+        session.execute_command(Command::Redo);
+        assert!(!session.active_doc().unwrap().is_dirty());
+
+        // 3. Clicking Ignore dismisses the banner until a subsequent external change,
+        //    and marks the buffer dirty relative to disk.
+        std::fs::write(&file, "# Version 3\n\nDritte Änderung.\n").unwrap();
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Modified
+        );
+        session.ignore_external_change(idx);
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Unchanged
+        );
+        assert!(session.active_doc().unwrap().is_dirty());
+
+        // Another external write re-triggers Modified!
+        std::fs::write(&file, "# Version 4\n\nVierte Änderung.\n").unwrap();
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Modified
+        );
+
+        // Saving our own version overwrites disk and clears external_state + dirty flag.
+        session.save_active_tab().unwrap();
+        assert!(!session.active_doc().unwrap().is_dirty());
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Unchanged
+        );
+
+        // 4. External deletion marks tab Deleted and dirty so user cannot lose in-memory text.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            session.check_tab_external_change(idx),
+            ExternalDiskState::Deleted
+        );
+        assert!(session.active_doc().unwrap().is_dirty());
     }
 }

@@ -5,6 +5,14 @@ All notable changes to **KMark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **External File Modification Detection & Kate-Style Reload**:
+  - Watches all open files and their parent directories via `QFileSystemWatcher` (surviving atomic `rename` saves by `git`, `vim`, `sed -i`, or sync tools) and re-verifies open tabs on window activation and tab switches without false alarms on identical-content rewrites.
+  - Displays a non-modal Kate-style inline notification banner above the editor viewport with **Reload** (*Neu laden*), **Overwrite** (*Überschreiben*) / **Save Again** (*Erneut speichern*), and **Ignore** (*Ignorieren*), highlighting edit conflicts and deleted/moved files with tab warning badges.
+  - Added `File -> Reload from Disk` (`F5`), recording the pre-reload buffer in `DocumentHistory` so every reload remains undoable with `Ctrl+Z`.
+
 ## [0.1.1] - 2026-11-12
 
 ### Added
