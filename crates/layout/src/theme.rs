@@ -53,6 +53,10 @@ pub struct ThemePalette {
     pub table_header_bg: Rgba,
     pub table_border: Rgba,
     pub caret: Rgba,
+    /// Text color per heading level (`[0]` = H1). Fully transparent means "use `text_fg`".
+    pub heading_fg: [Rgba; 6],
+    /// Text color of inline code spans. Fully transparent means "inherit the surrounding color".
+    pub inline_code_fg: Rgba,
 }
 
 impl Default for ThemePalette {
@@ -88,6 +92,8 @@ impl ThemePalette {
             table_header_bg: Rgba::rgb(239, 241, 244),
             table_border: Rgba::rgb(198, 205, 212),
             caret: Rgba::rgb(35, 38, 41),
+            heading_fg: [Rgba::rgba(0, 0, 0, 0); 6],
+            inline_code_fg: Rgba::rgba(0, 0, 0, 0),
         }
     }
 
@@ -117,6 +123,28 @@ impl ThemePalette {
             table_header_bg: Rgba::rgb(38, 43, 48),
             table_border: Rgba::rgb(74, 82, 92),
             caret: Rgba::rgb(252, 252, 252),
+            heading_fg: [Rgba::rgba(0, 0, 0, 0); 6],
+            inline_code_fg: Rgba::rgba(0, 0, 0, 0),
+        }
+    }
+
+    /// Text color for a heading of `level` (1–6), falling back to `text_fg`.
+    #[must_use]
+    pub fn heading_color(&self, level: u8) -> Rgba {
+        let idx = usize::from(level.clamp(1, 6)).saturating_sub(1);
+        match self.heading_fg.get(idx) {
+            Some(c) if c.a > 0 => *c,
+            _ => self.text_fg,
+        }
+    }
+
+    /// Text color for inline code, falling back to the surrounding `base` color.
+    #[must_use]
+    pub const fn inline_code_color(&self, base: Rgba) -> Rgba {
+        if self.inline_code_fg.a > 0 {
+            self.inline_code_fg
+        } else {
+            base
         }
     }
 

@@ -102,6 +102,8 @@ pub struct KMarkPalette {
     pub table_header_bg: KMarkRgba,
     pub table_border: KMarkRgba,
     pub caret: KMarkRgba,
+    pub heading_fg: [KMarkRgba; 6],
+    pub inline_code_fg: KMarkRgba,
 }
 
 impl From<ThemePalette> for KMarkPalette {
@@ -129,6 +131,8 @@ impl From<ThemePalette> for KMarkPalette {
             table_header_bg: p.table_header_bg.into(),
             table_border: p.table_border.into(),
             caret: p.caret.into(),
+            heading_fg: p.heading_fg.map(Into::into),
+            inline_code_fg: p.inline_code_fg.into(),
         }
     }
 }
@@ -158,6 +162,8 @@ impl From<KMarkPalette> for ThemePalette {
             table_header_bg: p.table_header_bg.into(),
             table_border: p.table_border.into(),
             caret: p.caret.into(),
+            heading_fg: p.heading_fg.map(Into::into),
+            inline_code_fg: p.inline_code_fg.into(),
         }
     }
 }

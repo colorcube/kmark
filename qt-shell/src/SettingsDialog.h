@@ -35,6 +35,7 @@ private:
     void onAnyAppearanceEdited();
     void updateColorButtonsUi();
     void pickColorSlot(int colorIndex);
+    void resetOptionalColorSlot(int colorIndex);
     void saveCurrentAsPreset();
     void deleteSelectedUserPreset();
     void restoreDefaults();
@@ -60,7 +61,7 @@ private:
 
     /* Colors */
     QCheckBox* m_chkSysColors = nullptr;
-    std::array<QPushButton*, 8> m_colorBtns{};
+    std::array<QPushButton*, 12> m_colorBtns{};
 
     /* Editor & View */
     QComboBox* m_defaultModeCombo = nullptr;

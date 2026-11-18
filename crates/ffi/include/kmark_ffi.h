@@ -55,6 +55,8 @@ typedef struct KMarkPalette {
     KMarkRgba table_header_bg;
     KMarkRgba table_border;
     KMarkRgba caret;
+    KMarkRgba heading_fg[6];   /* H1..H6 text; alpha 0 = use text_fg */
+    KMarkRgba inline_code_fg;  /* alpha 0 = inherit surrounding color */
 } KMarkPalette;
 
 /* Draw command tags */

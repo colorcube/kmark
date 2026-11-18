@@ -1107,7 +1107,7 @@ fn layout_single_block(
             };
 
             let first_row_idx = ctx.visual_rows.len();
-            let text_fg = ctx.config.palette.text_fg;
+            let heading_fg = ctx.config.palette.heading_color(level);
             y = layout_inline_line(
                 ctx,
                 InlineLineSpec {
@@ -1119,7 +1119,7 @@ fn layout_single_block(
                     font_px: h_size,
                     base_bold: true,
                     reveal_raw,
-                    base_color: text_fg,
+                    base_color: heading_fg,
                 },
             );
 

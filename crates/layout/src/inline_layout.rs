@@ -282,6 +282,8 @@ pub(crate) fn layout_inline_line(ctx: &mut LayoutCtx<'_>, spec: InlineLineSpec) 
                     ctx.config.palette.muted_fg
                 } else if tok.style.contains(StyleFlags::LINK) {
                     ctx.config.palette.link_fg
+                } else if is_code {
+                    ctx.config.palette.inline_code_color(base_color)
                 } else {
                     base_color
                 };

@@ -52,6 +52,29 @@ QColor colorFromHexArgb(const QString& s, const QColor& fallback) {
     return parsed.isValid() ? parsed : fallback;
 }
 
+/* Optional colors are stored as an empty string when unset (= follow the text color). */
+QString optionalColorToHex(const QColor& c) {
+    return c.isValid() ? colorToHexArgb(c) : QString();
+}
+
+KMarkRgba optionalFfiColor(const QColor& c) {
+    return c.isValid() ? toFfiColor(c) : KMarkRgba{0, 0, 0, 0};
+}
+
+void readOptionalColors(const QSettings& qs, AppearanceColors& c) {
+    c.h1Fg = colorFromHexArgb(qs.value(QStringLiteral("h1Fg")).toString(), QColor());
+    c.h2Fg = colorFromHexArgb(qs.value(QStringLiteral("h2Fg")).toString(), QColor());
+    c.h3Fg = colorFromHexArgb(qs.value(QStringLiteral("h3Fg")).toString(), QColor());
+    c.inlineCodeFg = colorFromHexArgb(qs.value(QStringLiteral("inlineCodeFg")).toString(), QColor());
+}
+
+void writeOptionalColors(QSettings& qs, const AppearanceColors& c) {
+    qs.setValue(QStringLiteral("h1Fg"), optionalColorToHex(c.h1Fg));
+    qs.setValue(QStringLiteral("h2Fg"), optionalColorToHex(c.h2Fg));
+    qs.setValue(QStringLiteral("h3Fg"), optionalColorToHex(c.h3Fg));
+    qs.setValue(QStringLiteral("inlineCodeFg"), optionalColorToHex(c.inlineCodeFg));
+}
+
 } // namespace
 
 KMarkPalette AppearanceColors::toFfiPalette() const {
@@ -91,6 +114,11 @@ KMarkPalette AppearanceColors::toFfiPalette() const {
 
     pal.table_header_bg = toFfiColor(tableHeaderBg);
     pal.table_border = toFfiColor(blendColor(canvasBg, textFg, isDark ? 0.24 : 0.20));
+
+    pal.heading_fg[0] = optionalFfiColor(h1Fg);
+    pal.heading_fg[1] = optionalFfiColor(h2Fg);
+    pal.heading_fg[2] = optionalFfiColor(h3Fg);
+    pal.inline_code_fg = optionalFfiColor(inlineCodeFg);
 
     return pal;
 }
@@ -295,6 +323,73 @@ const QList<AppearancePreset>& builtinPresets() {
             presets.append(p);
         }
 
+        /* 7./8. Ardoise (light/dark). Colors adapted from the Obsidian theme "Ardoise"
+         * by generalentropy (MIT License, https://github.com/generalentropy/obsidian-ardoise). */
+        const QString ardoiseSans = pickInstalledFamily(
+            {"Hanken Grotesk", "Atkinson Hyperlegible Next", "Atkinson Hyperlegible", "Inter", "Noto Sans"},
+            QFontDatabase::GeneralFont
+        );
+        const QString ardoiseMono = pickInstalledFamily(
+            {"Geist Mono", "JetBrains Mono", "JetBrainsMono Nerd Font", "Hack", "Noto Sans Mono", "DejaVu Sans Mono"},
+            QFontDatabase::FixedFont
+        );
+        auto ardoiseBase = [&]() {
+            AppearancePreset p;
+            p.isBuiltin = true;
+            p.useSystemSans = false;
+            p.sansFamily = ardoiseSans;
+            p.useSystemMono = false;
+            p.monoFamily = ardoiseMono;
+            p.baseFontPx = 16.0f;
+            p.lineSpacing = 1.65f;
+            p.maxProseWidth = 760.0f;
+            p.headingMarks = KMARK_MARKS_NONE;
+            p.useSystemColors = false;
+            return p;
+        };
+        {
+            AppearancePreset p = ardoiseBase();
+            p.id = QStringLiteral("builtin:ardoise-light");
+            p.nameEn = QStringLiteral("Ardoise (Light)");
+            p.nameDe = QStringLiteral("Ardoise (Hell)");
+            p.descEn = QStringLiteral("Pale blue-grey slate paper, ochre accents, airy line spacing. After the Obsidian theme Ardoise.");
+            p.descDe = QStringLiteral("Helles blaugraues Schieferpapier, Ocker-Akzente, luftiger Zeilenabstand. Nach dem Obsidian-Theme Ardoise.");
+            p.colors.canvasBg = QColor(0xEE, 0xF0, 0xF2);
+            p.colors.textFg = QColor(0x2F, 0x37, 0x40);
+            p.colors.accent = QColor(0x8C, 0x5F, 0x1F);
+            p.colors.linkFg = QColor(0x8C, 0x5F, 0x1F);
+            p.colors.codeBg = QColor(0xDF, 0xE4, 0xE8);
+            p.colors.quoteBar = QColor(0x9B, 0x75, 0x3F);
+            p.colors.highlightBg = QColor(0xC4, 0x92, 0x46, 82);
+            p.colors.tableHeaderBg = QColor(0xE9, 0xEC, 0xEF);
+            p.colors.h1Fg = QColor(0x94, 0x6A, 0x2E);
+            p.colors.h2Fg = QColor(0x3F, 0x66, 0x90);
+            p.colors.h3Fg = QColor(0x4C, 0x72, 0x46);
+            p.colors.inlineCodeFg = QColor(0x97, 0x48, 0x42);
+            presets.append(p);
+        }
+        {
+            AppearancePreset p = ardoiseBase();
+            p.id = QStringLiteral("builtin:ardoise-dark");
+            p.nameEn = QStringLiteral("Ardoise (Dark)");
+            p.nameDe = QStringLiteral("Ardoise (Dunkel)");
+            p.descEn = QStringLiteral("Dark slate canvas, warm off-white ink, soft ochre accents. After the Obsidian theme Ardoise.");
+            p.descDe = QStringLiteral("Dunkler Schiefer, warmes Altweiß, sanfte Ocker-Akzente. Nach dem Obsidian-Theme Ardoise.");
+            p.colors.canvasBg = QColor(0x2D, 0x34, 0x3D);
+            p.colors.textFg = QColor(0xE2, 0xDE, 0xD6);
+            p.colors.accent = QColor(0xDB, 0xB5, 0x7C);
+            p.colors.linkFg = QColor(0xDB, 0xB5, 0x7C);
+            p.colors.codeBg = QColor(0x22, 0x28, 0x2F);
+            p.colors.quoteBar = QColor(0xC1, 0xA2, 0x73);
+            p.colors.highlightBg = QColor(0xDB, 0xB5, 0x7C, 82);
+            p.colors.tableHeaderBg = QColor(0x29, 0x30, 0x38);
+            p.colors.h1Fg = QColor(0xDC, 0xBD, 0x8F);
+            p.colors.h2Fg = QColor(0xA7, 0xC1, 0xDE);
+            p.colors.h3Fg = QColor(0xA9, 0xC7, 0xA1);
+            p.colors.inlineCodeFg = QColor(0xE0, 0xAB, 0xA6);
+            presets.append(p);
+        }
+
         return presets;
     }();
     return list;
@@ -339,6 +434,7 @@ AppSettings AppSettings::load() {
     s.customColors.quoteBar = colorFromHexArgb(qs.value(QStringLiteral("quoteBar")).toString(), s.customColors.quoteBar);
     s.customColors.highlightBg = colorFromHexArgb(qs.value(QStringLiteral("highlightBg")).toString(), s.customColors.highlightBg);
     s.customColors.tableHeaderBg = colorFromHexArgb(qs.value(QStringLiteral("tableHeaderBg")).toString(), s.customColors.tableHeaderBg);
+    readOptionalColors(qs, s.customColors);
     qs.endGroup();
 
     qs.beginGroup(QStringLiteral("Editor"));
@@ -391,6 +487,7 @@ AppSettings AppSettings::load() {
         up.colors.quoteBar = colorFromHexArgb(qs.value(QStringLiteral("quoteBar")).toString(), up.colors.quoteBar);
         up.colors.highlightBg = colorFromHexArgb(qs.value(QStringLiteral("highlightBg")).toString(), up.colors.highlightBg);
         up.colors.tableHeaderBg = colorFromHexArgb(qs.value(QStringLiteral("tableHeaderBg")).toString(), up.colors.tableHeaderBg);
+        readOptionalColors(qs, up.colors);
         s.userPresets.append(up);
     }
     qs.endArray();
@@ -426,6 +523,7 @@ void AppSettings::save() const {
     qs.setValue(QStringLiteral("quoteBar"), colorToHexArgb(customColors.quoteBar));
     qs.setValue(QStringLiteral("highlightBg"), colorToHexArgb(customColors.highlightBg));
     qs.setValue(QStringLiteral("tableHeaderBg"), colorToHexArgb(customColors.tableHeaderBg));
+    writeOptionalColors(qs, customColors);
     qs.endGroup();
 
     qs.beginGroup(QStringLiteral("Editor"));
@@ -467,6 +565,7 @@ void AppSettings::save() const {
         qs.setValue(QStringLiteral("quoteBar"), colorToHexArgb(up.colors.quoteBar));
         qs.setValue(QStringLiteral("highlightBg"), colorToHexArgb(up.colors.highlightBg));
         qs.setValue(QStringLiteral("tableHeaderBg"), colorToHexArgb(up.colors.tableHeaderBg));
+        writeOptionalColors(qs, up.colors);
     }
     qs.endArray();
     qs.sync();

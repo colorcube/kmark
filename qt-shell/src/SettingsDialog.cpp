@@ -10,6 +10,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
@@ -120,7 +121,7 @@ protected:
             p.drawText(QPointF(12.0, hBase), QStringLiteral("##"));
         }
         p.setFont(hFont);
-        p.setPen(fg);
+        p.setPen(pal.heading_fg[0].a > 0 ? toQColor(pal.heading_fg[0]) : fg);
         p.drawText(
             QPointF(leftX, hBase),
             trBi(m_lang, "Heading & Typography", "Überschrift & Typografie")
@@ -171,7 +172,7 @@ protected:
         p.setBrush(inlineCodeBg);
         p.drawRoundedRect(QRectF(x - 3.0, y + 1.0, cw + 8.0, bFm.height()), 4.0, 4.0);
         p.setFont(monoFont);
-        p.setPen(fg);
+        p.setPen(pal.inline_code_fg.a > 0 ? toQColor(pal.inline_code_fg) : fg);
         p.drawText(QPointF(x + 1.0, bBase), sCode);
 
         y += bFm.height() * m_settings->lineSpacing + 4.0;
@@ -377,27 +378,46 @@ SettingsDialog::SettingsDialog(const AppSettings& current, UiLang lang, QWidget*
     );
     colorVBox->addWidget(m_chkSysColors);
 
-    const std::array<QString, 8> colorLabels = {{
+    const std::array<QString, 12> colorLabels = {{
         T("Background:", "Hintergrund:"),
         T("Body text:", "Textfarbe:"),
-        T("Accent / H1–H6:", "Akzent / H1–H6:"),
+        T("Accent:", "Akzent:"),
         T("Links:", "Links:"),
         T("Code block:", "Codeblock:"),
         T("Quote bar:", "Zitatbalken:"),
         T("Highlight (==…==):", "Textmarker (==…==):"),
         T("Table header:", "Tabellenkopf:"),
+        T("Heading 1:", "Überschrift 1:"),
+        T("Heading 2:", "Überschrift 2:"),
+        T("Heading 3:", "Überschrift 3:"),
+        T("Inline code:", "Inline-Code:"),
     }};
 
     auto* colorGrid = new QGridLayout();
     colorGrid->setHorizontalSpacing(10);
     colorGrid->setVerticalSpacing(6);
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 12; ++i) {
         const int row = i / 2;
         const int col = (i % 2) * 2;
         auto* lbl = new QLabel(colorLabels[static_cast<size_t>(i)], colorGroup);
         auto* btn = new QPushButton(colorGroup);
         btn->setMinimumWidth(118);
         connect(btn, &QPushButton::clicked, this, [this, i]() { pickColorSlot(i); });
+        if (i >= 8) {
+            /* Optional text colors: right-click resets them to "follow the body text color". */
+            btn->setToolTip(T(
+                "Right-click to use the body text color again.",
+                "Rechtsklick: wieder die Textfarbe verwenden."
+            ));
+            btn->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(btn, &QPushButton::customContextMenuRequested, this, [this, i, btn](const QPoint& pos) {
+                QMenu menu(btn);
+                QAction* reset = menu.addAction(T("Use body text color", "Textfarbe verwenden"));
+                if (menu.exec(btn->mapToGlobal(pos)) == reset) {
+                    resetOptionalColorSlot(i);
+                }
+            });
+        }
         m_colorBtns[static_cast<size_t>(i)] = btn;
         colorGrid->addWidget(lbl, row, col);
         colorGrid->addWidget(btn, row, col + 1);
@@ -678,7 +698,7 @@ void SettingsDialog::updateColorButtonsUi() {
         ? AppearanceColors::fromQtPalette(QApplication::palette())
         : m_working.customColors;
 
-    const std::array<QColor, 8> cols = {{
+    const std::array<QColor, 12> cols = {{
         shown.canvasBg,
         shown.textFg,
         shown.accent,
@@ -687,12 +707,21 @@ void SettingsDialog::updateColorButtonsUi() {
         shown.quoteBar,
         shown.highlightBg,
         shown.tableHeaderBg,
+        shown.h1Fg,
+        shown.h2Fg,
+        shown.h3Fg,
+        shown.inlineCodeFg,
     }};
 
     for (size_t i = 0; i < cols.size(); ++i) {
         QPushButton* btn = m_colorBtns[i];
-        btn->setIcon(makeColorSwatchIcon(cols[i]));
-        btn->setText(cols[i].name(QColor::HexRgb).toUpper());
+        if (cols[i].isValid()) {
+            btn->setIcon(makeColorSwatchIcon(cols[i]));
+            btn->setText(cols[i].name(QColor::HexRgb).toUpper());
+        } else {
+            btn->setIcon(makeColorSwatchIcon(shown.textFg));
+            btn->setText(T("Text color", "Textfarbe"));
+        }
         btn->setEnabled(!m_working.useSystemColors);
     }
 }
@@ -710,6 +739,10 @@ void SettingsDialog::pickColorSlot(int colorIndex) {
         case 5: target = &c.quoteBar; break;
         case 6: target = &c.highlightBg; allowAlpha = true; break;
         case 7: target = &c.tableHeaderBg; break;
+        case 8: target = &c.h1Fg; break;
+        case 9: target = &c.h2Fg; break;
+        case 10: target = &c.h3Fg; break;
+        case 11: target = &c.inlineCodeFg; break;
         default: return;
     }
 
@@ -718,7 +751,7 @@ void SettingsDialog::pickColorSlot(int colorIndex) {
         opts |= QColorDialog::ShowAlphaChannel;
     }
     const QColor chosen = QColorDialog::getColor(
-        *target,
+        target->isValid() ? *target : c.textFg,
         this,
         T("Choose Color", "Farbe auswählen"),
         opts
@@ -731,6 +764,19 @@ void SettingsDialog::pickColorSlot(int colorIndex) {
     m_syncing = true;
     m_chkSysColors->setChecked(false);
     m_syncing = false;
+    updateColorButtonsUi();
+    onAnyAppearanceEdited();
+}
+
+void SettingsDialog::resetOptionalColorSlot(int colorIndex) {
+    AppearanceColors& c = m_working.customColors;
+    switch (colorIndex) {
+        case 8: c.h1Fg = QColor(); break;
+        case 9: c.h2Fg = QColor(); break;
+        case 10: c.h3Fg = QColor(); break;
+        case 11: c.inlineCodeFg = QColor(); break;
+        default: return;
+    }
     updateColorButtonsUi();
     onAnyAppearanceEdited();
 }

@@ -156,6 +156,62 @@ mod tests {
         assert!((at_text.y - at_indent.y).abs() < 0.5);
     }
 
+    #[test]
+    fn heading_and_inline_code_colors_follow_palette() {
+        let md = "# Eins\n\n## Zwei\n\n#### Vier\n\nText mit `code` und Ende.\n";
+        let rope = Rope::from_str(md);
+        let blocks = parse_blocks(&rope);
+        let render = |palette: ThemePalette| {
+            let cfg = LayoutConfig {
+                view_mode: ViewMode::Wysiwyg,
+                palette,
+                ..LayoutConfig::default()
+            };
+            build_viewport_frame(
+                &ViewportRequest {
+                    rope: &rope,
+                    blocks: &blocks,
+                    selection: Selection::collapsed(md.len()),
+                    ime_preedit: None,
+                    search_matches: &[],
+                    active_match_idx: None,
+                    config: &cfg,
+                    viewport_w: 960.0,
+                    viewport_h: 700.0,
+                    scroll_y: 0.0,
+                    scroll_x: 0.0,
+                },
+                &mut FallbackMeasurer,
+            )
+        };
+        let color_of = |frame: &ViewportFrame, needle: &str| {
+            frame.draw_cmds.iter().find_map(|c| match c {
+                DrawCmd::Text { text, color, .. } if text == needle => Some(*color),
+                _ => None,
+            })
+        };
+
+        // Defaults (transparent) keep every heading and code span in the body text color.
+        let base = ThemePalette::breeze_light();
+        let frame = render(base);
+        for word in ["Eins", "Zwei", "Vier", "code"] {
+            assert_eq!(color_of(&frame, word), Some(base.text_fg), "{word}");
+        }
+
+        let h1 = Rgba::rgb(140, 95, 31);
+        let h2 = Rgba::rgb(63, 102, 144);
+        let code = Rgba::rgb(151, 72, 66);
+        let mut themed = base;
+        themed.heading_fg[0] = h1;
+        themed.heading_fg[1] = h2;
+        themed.inline_code_fg = code;
+        let frame = render(themed);
+        assert_eq!(color_of(&frame, "Eins"), Some(h1));
+        assert_eq!(color_of(&frame, "Zwei"), Some(h2));
+        assert_eq!(color_of(&frame, "Vier"), Some(base.text_fg));
+        assert_eq!(color_of(&frame, "code"), Some(code));
+    }
+
     fn source_frame(
         rope: &Rope,
         caret: usize,

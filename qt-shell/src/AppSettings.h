@@ -22,6 +22,11 @@ struct AppearanceColors {
     QColor quoteBar{189, 195, 199};
     QColor highlightBg{255, 235, 110, 175};
     QColor tableHeaderBg{239, 241, 244};
+    /* Optional text colors; an invalid QColor means "use the body text color". */
+    QColor h1Fg;
+    QColor h2Fg;
+    QColor h3Fg;
+    QColor inlineCodeFg;
 
     bool operator==(const AppearanceColors& other) const = default;
 
