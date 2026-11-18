@@ -835,6 +835,13 @@ void MainWindow::setupCentralArea() {
         }
     });
 
+    /* Kate-style: double-clicking the empty tab bar area (index -1) opens a new document. */
+    connect(m_tabBar, &QTabBar::tabBarDoubleClicked, this, [this](int index) {
+        if (index < 0 && m_session != nullptr && !kmark_session_is_poisoned(m_session)) {
+            actionNewTab();
+        }
+    });
+
     /* Kate-style non-modal inline notification banner for external file modifications */
     m_externalChangeBar = new QFrame(container);
     m_externalChangeBar->setObjectName(QStringLiteral("ExternalChangeBar"));
