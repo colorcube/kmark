@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-18
+
 ### Added
+- **Soft Wrap & Horizontal Scrolling in Source / TXT Mode**: Long lines follow *Dynamic Word Wrap* (`F10`); with wrap off the view scrolls horizontally (scrollbar, `Shift`+wheel, caret follow).
+- **Ardoise Appearance Presets**: *Ardoise (Light)* and *Ardoise (Dark)*, adapted from the MIT-licensed Obsidian theme by generalentropy.
+- **Heading & Inline-Code Colors**: Optional text colors for H1–H3 and inline code in *Settings -> Colors* (right-click resets to the text color).
+- Double-clicking the empty tab bar area opens a new document.
 - **External File Modification Detection & Kate-Style Reload**:
   - Watches all open files and their parent directories via `QFileSystemWatcher` (surviving atomic `rename` saves by `git`, `vim`, `sed -i`, or sync tools) and re-verifies open tabs on window activation and tab switches without false alarms on identical-content rewrites.
   - Displays a non-modal Kate-style inline notification banner above the editor viewport with **Reload** (*Neu laden*), **Overwrite** (*Überschreiben*) / **Save Again** (*Erneut speichern*), and **Ignore** (*Ignorieren*), highlighting edit conflicts and deleted/moved files with tab warning badges.
   - Added `File -> Reload from Disk` (`F5`), recording the pre-reload buffer in `DocumentHistory` so every reload remains undoable with `Ctrl+Z`.
+
+### Fixed
+- Bold/italic text containing an inline code span is now rendered correctly instead of showing literal `**`.
+- Indented and lazy continuation lines stay inside their list item instead of becoming separate paragraphs.
 
 ## [0.1.1] - 2026-11-12
 

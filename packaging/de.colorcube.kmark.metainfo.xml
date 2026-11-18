@@ -43,6 +43,11 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.1.2" date="2026-11-18">
+      <description>
+        <p>Soft wrap and horizontal scrolling in Source/TXT mode, Ardoise appearance presets with heading colors, external file change detection with reload, and Markdown rendering fixes for emphasis with inline code and list continuation lines.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-12">
       <description>
         <p>Open files as tabs in the already-running KMark window by default (with -n/--new-window override, taskbar New Window action, and Settings toggle).</p>
