@@ -104,6 +104,71 @@ mod tests {
         assert!(st.contains(StyleFlags::ITALIC));
     }
 
+    /// Renders tokens as `‹marker›` / `[text|flags]` for compact, readable assertions.
+    fn token_shape(line: &str) -> Vec<(String, bool, u16)> {
+        parse_inline_tokens(0, line)
+            .into_iter()
+            .map(|t| {
+                let marker = matches!(t.kind, InlineTokenKind::SyntaxMarker);
+                (line[t.range].to_owned(), marker, t.style.0)
+            })
+            .collect()
+    }
+
+    fn style_of(line: &str, needle: &str) -> StyleFlags {
+        let pos = line.find(needle).unwrap() + 1;
+        active_styles_at(0, line, pos)
+    }
+
+    #[test]
+    fn emphasis_containing_inline_code_still_closes() {
+        // Regression #289: a code span inside `**…**` / `*…*` aborted the closer search,
+        // so the delimiters were drawn literally and the text was not bold/italic.
+        let line = "**Neue Quellen (`last_run_at IS NULL`):** Starten";
+        let st = style_of(line, "Neue");
+        assert!(st.contains(StyleFlags::BOLD), "{:?}", token_shape(line));
+        let code = style_of(line, "last_run_at");
+        assert!(code.contains(StyleFlags::CODE));
+        assert!(code.contains(StyleFlags::BOLD));
+        assert!(style_of(line, "):").contains(StyleFlags::BOLD));
+        assert!(!style_of(line, "Starten").contains(StyleFlags::BOLD));
+        // The `**` delimiters are hidden markers, never literal text.
+        assert!(
+            token_shape(line)
+                .iter()
+                .filter(|(txt, marker, _)| !marker && txt.contains("**"))
+                .count()
+                == 0
+        );
+
+        let italic = "*kursiv `code` kursiv* danach";
+        assert!(style_of(italic, "kursiv").contains(StyleFlags::ITALIC));
+        assert!(style_of(italic, "code").contains(StyleFlags::ITALIC));
+        assert!(!style_of(italic, "danach").contains(StyleFlags::ITALIC));
+
+        let double_ticks = "**a ``x ` y`` b** c";
+        assert!(style_of(double_ticks, "b**").contains(StyleFlags::BOLD));
+        assert!(style_of(double_ticks, "x ` y").contains(StyleFlags::CODE));
+    }
+
+    #[test]
+    fn delimiters_inside_code_spans_never_close_emphasis() {
+        // `**` inside the code span must not close the outer bold; the final `**` does.
+        let line = "**a `**` b** c";
+        assert!(style_of(line, "b**").contains(StyleFlags::BOLD));
+        let code_tok = token_shape(line)
+            .into_iter()
+            .find(|(txt, marker, _)| !marker && txt == "**")
+            .unwrap();
+        assert_ne!(code_tok.2 & StyleFlags::CODE.0, 0);
+        assert!(!style_of(line, " c").contains(StyleFlags::BOLD));
+
+        // Unmatched backtick is literal text and does not block the closer.
+        let lone = "**preis `5 €** danach";
+        assert!(style_of(lone, "preis").contains(StyleFlags::BOLD));
+        assert!(!style_of(lone, "danach").contains(StyleFlags::BOLD));
+    }
+
     #[test]
     fn parses_and_formats_image_captions_and_relative_sizes() {
         let md = format_markdown_image(

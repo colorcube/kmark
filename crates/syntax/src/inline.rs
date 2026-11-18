@@ -691,7 +691,20 @@ fn find_closing_delimiter(after_open: &str, delim: &str) -> Option<usize> {
             continue;
         }
         if bytes[i] == b'`' {
-            return None;
+            // Skip over a complete inline code span so delimiters inside it never close the
+            // emphasis, while emphasis that merely *contains* code (`**a `b` c**`) still closes.
+            // An unmatched backtick run is literal text and is stepped over as a whole.
+            let ticks = bytes
+                .get(i..)
+                .map_or(1, |s| s.iter().take_while(|&&c| c == b'`').count());
+            let content_start = i.saturating_add(ticks);
+            i = find_closing_backticks(after_open.get(content_start..).unwrap_or(""), ticks)
+                .map_or(content_start, |close_rel| {
+                    content_start
+                        .saturating_add(close_rel)
+                        .saturating_add(ticks)
+                });
+            continue;
         }
         if bytes.get(i..i.saturating_add(dbytes.len())) == Some(dbytes) {
             if i == 0 {
