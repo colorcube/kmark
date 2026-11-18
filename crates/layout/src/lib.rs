@@ -5,6 +5,7 @@ pub mod context;
 pub mod engine;
 pub mod hit_test;
 mod inline_layout;
+pub mod line_wrap;
 pub mod measurer;
 mod table_layout;
 pub mod theme;
@@ -15,6 +16,7 @@ pub use engine::{
     ViewMode, ViewportFrame, VisualRow, build_viewport_frame, build_viewport_frame_cached,
 };
 pub use hit_test::{CalloutBadgeHitBox, CheckboxHitBox, CodeLangHitBox, HitTarget};
+pub use line_wrap::LineWrapCache;
 pub use measurer::{FallbackMeasurer, FontMetrics, FontRole, MeasuredRun, TextMeasurer};
 pub use theme::{Rgba, ThemePalette};
 
@@ -51,6 +53,7 @@ mod tests {
                 viewport_w: 960.0,
                 viewport_h: 700.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -81,6 +84,7 @@ mod tests {
                 viewport_w: 960.0,
                 viewport_h: 700.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -122,6 +126,7 @@ mod tests {
                     viewport_w: 960.0,
                     viewport_h: 700.0,
                     scroll_y: 0.0,
+                    scroll_x: 0.0,
                 },
                 measurer,
             )
@@ -151,6 +156,129 @@ mod tests {
         assert!((at_text.y - at_indent.y).abs() < 0.5);
     }
 
+    fn source_frame(
+        rope: &Rope,
+        caret: usize,
+        word_wrap: bool,
+        scroll_x: f32,
+        cache: &mut BlockHeightCache,
+    ) -> ViewportFrame {
+        let cfg = LayoutConfig {
+            view_mode: ViewMode::Source,
+            word_wrap,
+            ..LayoutConfig::default()
+        };
+        build_viewport_frame_cached(
+            &ViewportRequest {
+                rope,
+                blocks: &[],
+                selection: Selection::collapsed(caret),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 600.0,
+                viewport_h: 400.0,
+                scroll_y: 0.0,
+                scroll_x,
+            },
+            &mut FallbackMeasurer,
+            Some(cache),
+        )
+    }
+
+    fn text_cmds(frame: &ViewportFrame) -> Vec<(f32, f32, String)> {
+        frame
+            .draw_cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text {
+                    x,
+                    baseline_y,
+                    text,
+                    ..
+                } if !text.trim().is_empty() && text.parse::<u32>().is_err() => {
+                    Some((*x, *baseline_y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn source_mode_soft_wraps_long_lines() {
+        // Regression #288: long lines in Source/TXT mode ran off the right edge.
+        let md = format!("kurz\n{}ENDE\nletzte\n", "Wort ".repeat(60));
+        let rope = Rope::from_str(&md);
+        let mut cache = BlockHeightCache::new();
+        let end = md.find("ENDE").unwrap() + 4;
+        let frame = source_frame(&rope, end, true, 0.0, &mut cache);
+
+        let texts = text_cmds(&frame);
+        let long_rows: Vec<_> = texts
+            .iter()
+            .filter(|t| t.2.contains("Wort") || t.2.contains("ENDE"))
+            .collect();
+        assert!(long_rows.len() >= 3, "{texts:?}");
+        // All rows start at the same x and stack downwards.
+        assert!(
+            long_rows
+                .windows(2)
+                .all(|w| w[0].0 == w[1].0 && w[1].1 > w[0].1)
+        );
+        // Nothing overflows the viewport, no horizontal scrolling.
+        assert!((frame.total_width - frame.viewport_w).abs() < 0.5);
+        // The line below follows the wrapped rows; the caret sits on the last wrapped row.
+        let last = texts.iter().find(|t| t.2 == "letzte").unwrap();
+        assert!(last.1 > long_rows.last().unwrap().1);
+        let last_row_y = frame
+            .visual_rows
+            .iter()
+            .filter(|r| r.line_idx == 1)
+            .map(|r| r.y_doc)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (frame.caret_doc_rect.y - last_row_y).abs() < 0.5,
+            "{frame:?}"
+        );
+        // Gutter-free: one row per wrapped segment, exact document height.
+        let rows_for_line = frame.visual_rows.iter().filter(|r| r.line_idx == 1).count();
+        assert_eq!(rows_for_line, long_rows.len());
+    }
+
+    #[test]
+    fn source_mode_without_wrap_scrolls_horizontally() {
+        let md = format!("{}ENDE\n", "Wort ".repeat(60));
+        let rope = Rope::from_str(&md);
+        let mut cache = BlockHeightCache::new();
+        let end = md.find("ENDE").unwrap() + 4;
+
+        let unscrolled = source_frame(&rope, end, false, 0.0, &mut cache);
+        assert!(unscrolled.total_width > unscrolled.viewport_w + 200.0);
+        let base_x = text_cmds(&unscrolled)[0].0;
+
+        let frame = source_frame(&rope, end, false, 300.0, &mut cache);
+        assert!((frame.scroll_x - 300.0).abs() < f32::EPSILON);
+        let shifted_x = text_cmds(&frame)[0].0;
+        assert!((base_x - shifted_x - 300.0).abs() < 0.5);
+        // Caret and hit-testing agree in scrolled viewport coordinates.
+        assert!(
+            (frame.caret_viewport_rect.x - (unscrolled.caret_viewport_rect.x - 300.0)).abs() < 0.5
+        );
+        let hit = frame.hit_test(
+            frame.caret_viewport_rect.x,
+            frame.caret_viewport_rect.y + 4.0,
+        );
+        assert!(
+            matches!(hit, HitTarget::Text { byte_offset, .. } if byte_offset == end),
+            "{hit:?}"
+        );
+
+        // With word wrap on, a stale scroll_x is ignored.
+        let wrapped = source_frame(&rope, end, true, 300.0, &mut cache);
+        assert!(wrapped.scroll_x.abs() < f32::EPSILON);
+    }
+
     #[test]
     fn hit_testing_maps_click_on_checkbox_and_code_badge() {
         let md = "- [ ] Klick mich\n\n```rust\nlet x = 1;\n```\n";
@@ -171,6 +299,7 @@ mod tests {
                 viewport_w: 900.0,
                 viewport_h: 600.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -211,6 +340,7 @@ mod tests {
                 viewport_w: 960.0,
                 viewport_h: 600.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -346,6 +476,7 @@ mod tests {
                 viewport_w: 960.0,
                 viewport_h: 600.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -407,6 +538,7 @@ mod tests {
                 viewport_w: 900.0,
                 viewport_h: 600.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -447,6 +579,7 @@ mod tests {
                 viewport_w: 820.0,
                 viewport_h: 600.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
         );
@@ -496,6 +629,7 @@ mod tests {
                     viewport_w: 920.0,
                     viewport_h: 680.0,
                     scroll_y,
+                    scroll_x: 0.0,
                 },
                 &mut measurer,
                 Some(&mut height_cache),
@@ -531,6 +665,7 @@ mod tests {
                     viewport_w: 920.0,
                     viewport_h: 680.0,
                     scroll_y: probe_scroll,
+                    scroll_x: 0.0,
                 },
                 &mut measurer,
                 Some(&mut height_cache),
@@ -588,6 +723,7 @@ mod tests {
                     viewport_w: 900.0,
                     viewport_h: 640.0,
                     scroll_y,
+                    scroll_x: 0.0,
                 },
                 &mut measurer,
                 Some(&mut height_cache),
@@ -618,6 +754,7 @@ mod tests {
                 viewport_w: 900.0,
                 viewport_h: 640.0,
                 scroll_y: full_measured_h * 0.5,
+                scroll_x: 0.0,
             },
             &mut measurer,
             Some(&mut height_cache),
@@ -635,6 +772,7 @@ mod tests {
                 viewport_w: 900.0,
                 viewport_h: 640.0,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
             },
             &mut measurer,
             Some(&mut height_cache),

@@ -126,8 +126,14 @@ EditorViewport::EditorViewport(KMarkSession* session, QWidget* parent)
     );
 
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
-        if (m_session != nullptr) {
+        if (m_session != nullptr && !m_syncingScrollBars) {
             kmark_session_set_scroll_y(m_session, static_cast<float>(value));
+            viewport()->update();
+        }
+    });
+    connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        if (m_session != nullptr && !m_syncingScrollBars) {
+            kmark_session_set_scroll_x(m_session, static_cast<float>(value));
             viewport()->update();
         }
     });
@@ -476,12 +482,14 @@ void EditorViewport::paintEvent(QPaintEvent* event) {
     }
 
     {
+        /* No QSignalBlocker here: QAbstractScrollArea shows/hides AsNeeded scrollbars via
+           rangeChanged, so only our own valueChanged write-back is suppressed. */
+        m_syncingScrollBars = true;
         QScrollBar* sb = verticalScrollBar();
         const int maxScroll = std::max(0, static_cast<int>(std::ceil(frame.total_height - vh * 0.6f)));
         const int pageStep = static_cast<int>(vh);
         const int scrollVal = static_cast<int>(std::lround(frame.scroll_y));
         if (sb->maximum() != maxScroll || sb->pageStep() != pageStep || sb->value() != scrollVal) {
-            const QSignalBlocker blocker(sb);
             if (sb->maximum() != maxScroll || sb->minimum() != 0) {
                 sb->setRange(0, maxScroll);
             }
@@ -493,6 +501,25 @@ void EditorViewport::paintEvent(QPaintEvent* event) {
                 sb->setValue(scrollVal);
             }
         }
+
+        /* Horizontal scrollbar: only line modes without word wrap report total_width > viewport. */
+        QScrollBar* hsb = horizontalScrollBar();
+        const int maxScrollX = std::max(0, static_cast<int>(std::ceil(frame.total_width - vw)));
+        const int pageStepX = std::max(1, static_cast<int>(vw));
+        const int scrollValX = static_cast<int>(std::lround(frame.scroll_x));
+        if (hsb->maximum() != maxScrollX || hsb->pageStep() != pageStepX || hsb->value() != scrollValX) {
+            if (hsb->maximum() != maxScrollX || hsb->minimum() != 0) {
+                hsb->setRange(0, maxScrollX);
+            }
+            if (hsb->pageStep() != pageStepX) {
+                hsb->setPageStep(pageStepX);
+            }
+            hsb->setSingleStep(24);
+            if (hsb->value() != scrollValX) {
+                hsb->setValue(scrollValX);
+            }
+        }
+        m_syncingScrollBars = false;
     }
 
     m_lastCaretRect = QRectF(
@@ -1368,13 +1395,26 @@ void EditorViewport::wheelEvent(QWheelEvent* event) {
     }
 
     const QPoint pixelDelta = event->pixelDelta();
+    float dxPx = 0.0f;
     float dyPx = 0.0f;
     if (!pixelDelta.isNull()) {
+        dxPx = static_cast<float>(-pixelDelta.x());
         dyPx = static_cast<float>(-pixelDelta.y());
     } else {
+        dxPx = static_cast<float>(-event->angleDelta().x()) * 0.45f;
         dyPx = static_cast<float>(-event->angleDelta().y()) * 0.45f;
     }
-    kmark_session_scroll_pixels(m_session, dyPx);
+    /* Shift + wheel scrolls horizontally (Qt may already have swapped the axes). */
+    if (event->modifiers().testFlag(Qt::ShiftModifier) && dxPx == 0.0f) {
+        dxPx = dyPx;
+        dyPx = 0.0f;
+    }
+    if (dxPx != 0.0f) {
+        kmark_session_scroll_pixels_x(m_session, dxPx);
+    }
+    if (dyPx != 0.0f) {
+        kmark_session_scroll_pixels(m_session, dyPx);
+    }
     viewport()->update();
     event->accept();
 }

@@ -64,6 +64,8 @@ pub struct ViewportRequest<'a> {
     pub viewport_w: f32,
     pub viewport_h: f32,
     pub scroll_y: f32,
+    /// Horizontal scroll offset; only used by the line modes when word wrap is off.
+    pub scroll_x: f32,
 }
 
 /// Resolved canvas & column geometry for a single viewport frame.

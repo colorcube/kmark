@@ -14,6 +14,7 @@ use crate::context::{
 };
 use crate::hit_test::{CalloutBadgeHitBox, CheckboxHitBox, CodeLangHitBox};
 use crate::inline_layout::{layout_inline_line, layout_plain_code_line};
+use crate::line_wrap::{LineWrapCache, wrap_row_starts};
 use crate::measurer::{FontRole, MeasuredRun, TextMeasurer};
 use crate::table_layout::layout_table_2d;
 use crate::theme::{Rgba, ThemePalette};
@@ -185,6 +186,23 @@ pub enum DrawCmd {
     },
 }
 
+impl DrawCmd {
+    /// Moves the command horizontally by `dx` viewport pixels.
+    pub(crate) fn shift_x(&mut self, dx: f32) {
+        match self {
+            Self::FillRect { rect, .. }
+            | Self::StrokeRect { rect, .. }
+            | Self::Checkbox { rect, .. }
+            | Self::Image { rect, .. } => rect.x += dx,
+            Self::Line { x1, x2, .. } => {
+                *x1 += dx;
+                *x2 += dx;
+            }
+            Self::HeadingBars { x, .. } | Self::Text { x, .. } => *x += dx,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PositionedGlyphSpan {
     pub doc_range: Range<usize>,
@@ -213,7 +231,11 @@ pub struct ViewportFrame {
     pub viewport_w: f32,
     pub viewport_h: f32,
     pub scroll_y: f32,
+    /// Horizontal scroll offset applied to this frame (`0` unless a line mode runs without wrap).
+    pub scroll_x: f32,
     pub total_height: f32,
+    /// Total document width for the horizontal scrollbar (`<= viewport_w` when nothing overflows).
+    pub total_width: f32,
     pub gutter_w: f32,
     pub content_x: f32,
     pub content_w: f32,
@@ -325,6 +347,8 @@ pub struct BlockHeightCache {
     last_rope: Option<Rope>,
     by_index: Vec<SlotState>,
     by_content: std::collections::HashMap<BlockContentKey, f32>,
+    /// Visual row counts for the soft-wrapped line modes (*Source* / *Plain Text*).
+    pub(crate) lines: LineWrapCache,
 }
 
 impl BlockHeightCache {
@@ -338,6 +362,7 @@ impl BlockHeightCache {
         self.last_rope = None;
         self.by_index.clear();
         self.by_content.clear();
+        self.lines.clear();
     }
 
     fn prepare(
@@ -586,7 +611,8 @@ pub fn build_viewport_frame_cached(
     });
 
     if matches!(req.config.view_mode, ViewMode::PlainText | ViewMode::Source) {
-        return build_line_based_frame(req, geom, draw_cmds, measurer);
+        let line_cache = height_cache.as_deref_mut().map(|c| &mut c.lines);
+        return build_line_based_frame(req, geom, draw_cmds, measurer, line_cache);
     }
 
     if let Some(cache) = height_cache.as_deref_mut() {
@@ -794,6 +820,8 @@ pub fn build_viewport_frame_cached(
         viewport_w: vw,
         viewport_h: vh,
         scroll_y: req.scroll_y,
+        scroll_x: 0.0,
+        total_width: vw,
         total_height,
         gutter_w,
         content_x,
@@ -1591,6 +1619,7 @@ fn build_line_based_frame(
     geom: FrameGeometry,
     mut draw_cmds: Vec<DrawCmd>,
     measurer: &mut dyn TextMeasurer,
+    wrap_cache: Option<&mut LineWrapCache>,
 ) -> ViewportFrame {
     let FrameGeometry {
         vw,
@@ -1602,89 +1631,92 @@ fn build_line_based_frame(
     } = geom;
     let total_lines = req.rope.line_count();
     let pad_top = LINE_MODE_TOP_PAD_Y;
+    let font_px = req.config.base_font_px;
     let role = if req.config.view_mode == ViewMode::Source {
         FontRole::Monospace
     } else {
         FontRole::SansBody
     };
-
-    let first_vis = ((req.scroll_y - pad_top).max(0.0) / line_h).floor() as usize;
-    let vis_count = (vh / line_h).ceil() as usize + 6;
-    let end_vis = (first_vis.saturating_add(vis_count)).min(total_lines);
+    let wrap = req.config.word_wrap;
+    let scroll_x = if wrap { 0.0 } else { req.scroll_x.max(0.0) };
     let caret_line = req.rope.byte_to_line_col(req.selection.head).line;
 
-    let mut visual_rows = Vec::with_capacity(vis_count + 2);
-    let mut bg_cmds = Vec::new();
-    let mut fg_cmds = Vec::new();
-
-    // Ensure caret line is also shaped if off-screen so `caret_doc_rect` stays exact.
-    let mut lines_to_build: Vec<usize> = (first_vis..end_vis).collect();
-    if caret_line < total_lines && !lines_to_build.contains(&caret_line) {
-        lines_to_build.push(caret_line);
-        lines_to_build.sort_unstable();
+    // Vertical mapping: logical line -> first visual row. Without wrap every line is one row.
+    let mut local_cache = LineWrapCache::new();
+    let cache = wrap_cache.unwrap_or(&mut local_cache);
+    if wrap {
+        let cell_w = line_mode_cell_width(role, font_px, measurer);
+        cache.prepare(req.rope, prose_w, cell_w, role, MAX_SINGLE_LINE_SHAPE_BYTES);
     }
 
-    for l_idx in lines_to_build {
-        let y_doc = pad_top + (l_idx as f32) * line_h;
-        let r = req.rope.line_byte_range(l_idx);
-        let capped_end = if r.len() > MAX_SINGLE_LINE_SHAPE_BYTES {
-            req.rope
-                .clamp_char_boundary(r.start.saturating_add(MAX_SINGLE_LINE_SHAPE_BYTES))
+    let row_of_line = |cache: &mut LineWrapCache, line: usize| -> u64 {
+        if wrap {
+            cache.row_of_line(line)
         } else {
-            r.end
-        };
-        let txt = req.rope.slice_to_string(r.start..capped_end);
-        let is_heading_src =
-            req.config.view_mode == ViewMode::Source && txt.trim_start().starts_with('#');
-        let color = if is_heading_src {
-            req.config.palette.accent
-        } else {
-            req.config.palette.text_fg
-        };
-        let m = measurer.measure_run(&txt, role, req.config.base_font_px, is_heading_src, false);
-        let base_off = (line_h - (m.metrics.ascent + m.metrics.descent)) * 0.5 + m.metrics.ascent;
-
-        if y_doc + line_h >= req.scroll_y - 32.0
-            && y_doc <= req.scroll_y + vh + 32.0
-            && !txt.is_empty()
-        {
-            fg_cmds.push(DrawCmd::Text {
-                x: content_x,
-                baseline_y: (y_doc - req.scroll_y) + base_off,
-                text: txt,
-                role,
-                size_px: req.config.base_font_px,
-                bold: is_heading_src,
-                italic: false,
-                color,
-            });
+            line as u64
         }
-        let w = m.total_width;
-        let spans = if r.is_empty() {
-            Vec::new()
-        } else {
-            vec![PositionedGlyphSpan {
-                doc_range: r.start..capped_end,
-                x: content_x,
-                width: w,
-                measured: m,
-                is_hidden_marker: false,
-                link_url: None,
-            }]
-        };
-        visual_rows.push(VisualRow {
-            y_doc,
-            height: line_h,
-            baseline_offset: base_off,
-            line_idx: l_idx,
-            doc_range: r,
-            default_x: content_x,
-            content_width: w,
-            spans,
+    };
+
+    let first_row = ((req.scroll_y - pad_top).max(0.0) / line_h).floor() as u64;
+    let first_line = if wrap {
+        cache.line_at_row(first_row)
+    } else {
+        usize::try_from(first_row)
+            .unwrap_or(usize::MAX)
+            .min(total_lines.saturating_sub(1))
+    };
+    let view_bottom = req.scroll_y + vh + 32.0;
+
+    let mut out = LineFrameOut::default();
+    let mut caret_built = false;
+
+    // Visible lines, top to bottom; each line's `y` follows from the exact rows of the line above.
+    let mut l_idx = first_line;
+    let mut y_doc = pad_top + (row_of_line(cache, first_line) as f32) * line_h;
+    while l_idx < total_lines && y_doc <= view_bottom {
+        let rows = layout_source_line(req, measurer, l_idx, y_doc, &geom, role, &mut out);
+        if wrap {
+            cache.record_exact(l_idx, rows);
+        }
+        caret_built |= l_idx == caret_line;
+        y_doc += (rows as f32) * line_h;
+        l_idx = l_idx.saturating_add(1);
+    }
+
+    // Shape the caret line too when it is off-screen so `caret_doc_rect` stays exact.
+    if !caret_built && caret_line < total_lines {
+        let caret_y = pad_top + (row_of_line(cache, caret_line) as f32) * line_h;
+        let rows = layout_source_line(req, measurer, caret_line, caret_y, &geom, role, &mut out);
+        if wrap {
+            cache.record_exact(caret_line, rows);
+        }
+        out.visual_rows.sort_by(|a, b| {
+            a.y_doc
+                .partial_cmp(&b.y_doc)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
-    let total_height = (pad_top + (total_lines as f32) * line_h + DOC_BOTTOM_OVERSCROLL_Y).max(vh);
+    let total_rows = if wrap {
+        cache.total_rows()
+    } else {
+        total_lines as u64
+    };
+    let total_height = (pad_top + (total_rows as f32) * line_h + DOC_BOTTOM_OVERSCROLL_Y).max(vh);
+    let total_width = if wrap {
+        vw
+    } else {
+        cache.note_widest_line(role, font_px, out.widest);
+        (content_x + cache.widest_line() + CANVAS_PAD_X).max(vw)
+    };
+
+    let LineFrameOut {
+        mut visual_rows,
+        mut fg_cmds,
+        ..
+    } = out;
+    visual_rows.dedup_by(|a, b| a.y_doc == b.y_doc && a.doc_range == b.doc_range);
+    let mut bg_cmds = Vec::new();
     emit_range_highlights(
         &visual_rows,
         req.search_matches,
@@ -1705,7 +1737,7 @@ fn build_line_based_frame(
     );
 
     if let Some(preedit) = req.ime_preedit.filter(|s| !s.is_empty()) {
-        let m = measurer.measure_run(preedit, role, req.config.base_font_px, false, false);
+        let m = measurer.measure_run(preedit, role, font_px, false, false);
         let py = caret_viewport_rect.y;
         fg_cmds.push(DrawCmd::FillRect {
             rect: RectF::new(
@@ -1722,7 +1754,7 @@ fn build_line_based_frame(
             baseline_y: py + m.metrics.ascent,
             text: preedit.to_owned(),
             role,
-            size_px: req.config.base_font_px,
+            size_px: font_px,
             bold: false,
             italic: false,
             color: req.config.palette.text_fg,
@@ -1734,6 +1766,16 @@ fn build_line_based_frame(
             radius: 0.0,
         });
     }
+
+    // Everything above was placed in document X; apply the horizontal scroll before the gutter
+    // is painted on top so scrolled text slides underneath it.
+    if scroll_x > 0.0 {
+        for cmd in bg_cmds.iter_mut().chain(fg_cmds.iter_mut()) {
+            cmd.shift_x(-scroll_x);
+        }
+    }
+    let mut caret_viewport_rect = caret_viewport_rect;
+    caret_viewport_rect.x -= scroll_x;
 
     draw_cmds.extend(bg_cmds);
     draw_cmds.extend(fg_cmds);
@@ -1752,6 +1794,8 @@ fn build_line_based_frame(
         viewport_w: vw,
         viewport_h: vh,
         scroll_y: req.scroll_y,
+        scroll_x,
+        total_width,
         total_height,
         gutter_w,
         content_x,
@@ -1763,6 +1807,135 @@ fn build_line_based_frame(
         checkboxes: Vec::new(),
         code_lang_badges: Vec::new(),
         callout_badges: Vec::new(),
+    }
+}
+
+/// Visual rows and draw commands collected while laying out source/plain-text lines.
+#[derive(Default)]
+struct LineFrameOut {
+    visual_rows: Vec<VisualRow>,
+    fg_cmds: Vec<DrawCmd>,
+    /// Widest measured (unwrapped) line in this frame, for the horizontal scrollbar.
+    widest: f32,
+}
+
+/// Width of one character cell used to estimate wrapping of lines that were never laid out.
+fn line_mode_cell_width(role: FontRole, font_px: f32, measurer: &mut dyn TextMeasurer) -> f32 {
+    const SAMPLE: &str = "The quick brown fox jumps over the lazy dog 0123456789";
+    let m = measurer.measure_run(SAMPLE, role, font_px, false, false);
+    (m.total_width / SAMPLE.len() as f32).max(1.0)
+}
+
+/// Lays out logical line `l_idx` at `y_doc` (document coordinates) and returns its visual rows.
+fn layout_source_line(
+    req: &ViewportRequest<'_>,
+    measurer: &mut dyn TextMeasurer,
+    l_idx: usize,
+    y_doc: f32,
+    geom: &FrameGeometry,
+    role: FontRole,
+    out: &mut LineFrameOut,
+) -> u32 {
+    let content_x = geom.content_x;
+    let line_h = geom.default_line_h;
+    let font_px = req.config.base_font_px;
+    let r = req.rope.line_byte_range(l_idx);
+    let capped_end = if r.len() > MAX_SINGLE_LINE_SHAPE_BYTES {
+        req.rope
+            .clamp_char_boundary(r.start.saturating_add(MAX_SINGLE_LINE_SHAPE_BYTES))
+    } else {
+        r.end
+    };
+    let txt = req.rope.slice_to_string(r.start..capped_end);
+    let is_heading_src =
+        req.config.view_mode == ViewMode::Source && txt.trim_start().starts_with('#');
+    let color = if is_heading_src {
+        req.config.palette.accent
+    } else {
+        req.config.palette.text_fg
+    };
+    let m = measurer.measure_run(&txt, role, font_px, is_heading_src, false);
+    let base_off = (line_h - (m.metrics.ascent + m.metrics.descent)) * 0.5 + m.metrics.ascent;
+    out.widest = out.widest.max(m.total_width);
+
+    let starts = if req.config.word_wrap {
+        wrap_row_starts(&txt, &m.grapheme_ends, geom.prose_w)
+    } else {
+        vec![0]
+    };
+    let row_count = starts.len();
+    for (k, &s) in starts.iter().enumerate() {
+        let e = starts
+            .get(k.saturating_add(1))
+            .copied()
+            .unwrap_or(txt.len());
+        let row_y = y_doc + (k as f32) * line_h;
+        let sub = slice_measured_run(&m, s, e);
+        let row_txt = txt.get(s..e).unwrap_or("");
+
+        if row_y + line_h >= req.scroll_y - 32.0
+            && row_y <= req.scroll_y + geom.vh + 32.0
+            && !row_txt.is_empty()
+        {
+            out.fg_cmds.push(DrawCmd::Text {
+                x: content_x,
+                baseline_y: (row_y - req.scroll_y) + base_off,
+                text: row_txt.to_owned(),
+                role,
+                size_px: font_px,
+                bold: is_heading_src,
+                italic: false,
+                color,
+            });
+        }
+        let is_last = k.saturating_add(1) == row_count;
+        let row_start = r.start.saturating_add(s);
+        let row_end = if is_last {
+            r.end
+        } else {
+            r.start.saturating_add(e)
+        };
+        let width = sub.total_width;
+        let spans = if row_txt.is_empty() {
+            Vec::new()
+        } else {
+            vec![PositionedGlyphSpan {
+                doc_range: row_start..r.start.saturating_add(e),
+                x: content_x,
+                width,
+                measured: sub,
+                is_hidden_marker: false,
+                link_url: None,
+            }]
+        };
+        out.visual_rows.push(VisualRow {
+            y_doc: row_y,
+            height: line_h,
+            baseline_offset: base_off,
+            line_idx: l_idx,
+            doc_range: row_start..row_end,
+            default_x: content_x,
+            content_width: width,
+            spans,
+        });
+    }
+    u32::try_from(row_count).unwrap_or(u32::MAX).max(1)
+}
+
+/// Extracts the sub-run for bytes `s..e` of `m`, rebased to start at `x = 0`.
+fn slice_measured_run(m: &MeasuredRun, s: usize, e: usize) -> MeasuredRun {
+    let base_x = if s == 0 { 0.0 } else { m.x_at_rel_byte(s) };
+    let grapheme_ends: Vec<(usize, f32)> = m
+        .grapheme_ends
+        .iter()
+        .filter(|&&(b, _)| b > s && b <= e)
+        .map(|&(b, x)| (b.saturating_sub(s), x - base_x))
+        .collect();
+    let total_width = grapheme_ends.last().map_or(0.0, |&(_, x)| x);
+    MeasuredRun {
+        total_width,
+        metrics: m.metrics,
+        grapheme_ends,
     }
 }
 

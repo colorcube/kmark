@@ -52,7 +52,7 @@ impl ViewportFrame {
     #[must_use]
     pub fn hit_test(&self, vx: f32, vy: f32) -> HitTarget {
         let doc_y = vy + self.scroll_y;
-        let doc_x = vx;
+        let doc_x = vx + self.scroll_x;
 
         for badge in &self.code_lang_badges {
             if badge.rect_doc.contains(doc_x, doc_y) {

@@ -183,6 +183,8 @@ pub struct KMarkFrameView {
     pub viewport_h: f32,
     pub scroll_y: f32,
     pub total_height: f32,
+    pub scroll_x: f32,
+    pub total_width: f32,
     pub caret_rect: KMarkRectF,
     pub cmds_ptr: *const KMarkDrawCmd,
     pub cmds_len: usize,
@@ -197,6 +199,8 @@ impl Default for KMarkFrameView {
             viewport_h: 0.0,
             scroll_y: 0.0,
             total_height: 0.0,
+            scroll_x: 0.0,
+            total_width: 0.0,
             caret_rect: KMarkRectF::default(),
             cmds_ptr: ptr::null(),
             cmds_len: 0,
@@ -668,6 +672,8 @@ struct CachedRenderedFrame {
     viewport_h: f32,
     scroll_y: f32,
     total_height: f32,
+    scroll_x: f32,
+    total_width: f32,
     caret_rect: KMarkRectF,
 }
 
@@ -1586,6 +1592,20 @@ pub extern "C" fn kmark_session_set_scroll_y(session: *mut KMarkSession, scroll_
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_set_scroll_x(session: *mut KMarkSession, scroll_x: f32) {
+    with_session_mut(session, (), |s| {
+        s.session.set_scroll_x(scroll_x);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_scroll_pixels_x(session: *mut KMarkSession, delta_x: f32) {
+    with_session_mut(session, (), |s| {
+        s.session.scroll_x_by_pixels(delta_x);
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_scroll_pixels(session: *mut KMarkSession, delta_y: f32) {
     with_session_mut(session, (), |s| {
         s.session.scroll_by_pixels(delta_y);
@@ -1751,6 +1771,8 @@ pub extern "C" fn kmark_session_render_frame(
                 viewport_h: cached.viewport_h,
                 scroll_y: cached.scroll_y,
                 total_height: cached.total_height,
+                scroll_x: cached.scroll_x,
+                total_width: cached.total_width,
                 caret_rect: cached.caret_rect,
                 cmds_ptr: s.frame_cmds.as_ptr(),
                 cmds_len: s.frame_cmds.len(),
@@ -1763,7 +1785,15 @@ pub extern "C" fn kmark_session_render_frame(
         s.frame_text_pool.clear();
         s.measurer.image_cache.clear();
 
-        let (frame_vw, frame_vh, frame_scroll_y, frame_total_h, frame_caret) = {
+        let (
+            frame_vw,
+            frame_vh,
+            frame_scroll_y,
+            frame_total_h,
+            frame_scroll_x,
+            frame_total_w,
+            frame_caret,
+        ) = {
             let Some(frame) = s
                 .session
                 .render_viewport(viewport_w, viewport_h, &mut s.measurer)
@@ -1933,6 +1963,8 @@ pub extern "C" fn kmark_session_render_frame(
                 frame.viewport_h,
                 frame.scroll_y,
                 frame.total_height,
+                frame.scroll_x,
+                frame.total_width,
                 frame.caret_viewport_rect.into(),
             )
         };
@@ -1947,6 +1979,8 @@ pub extern "C" fn kmark_session_render_frame(
                 viewport_h: frame_vh,
                 scroll_y: frame_scroll_y,
                 total_height: frame_total_h,
+                scroll_x: frame_scroll_x,
+                total_width: frame_total_w,
                 caret_rect: frame_caret,
             });
         }
@@ -1956,6 +1990,8 @@ pub extern "C" fn kmark_session_render_frame(
             viewport_h: frame_vh,
             scroll_y: frame_scroll_y,
             total_height: frame_total_h,
+            scroll_x: frame_scroll_x,
+            total_width: frame_total_w,
             caret_rect: frame_caret,
             cmds_ptr: s.frame_cmds.as_ptr(),
             cmds_len: s.frame_cmds.len(),

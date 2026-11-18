@@ -168,6 +168,9 @@ private:
     float m_lastFontPx = 16.0f;
     QTimer m_caretTimer;
     bool m_caretVisible = true;
+    /* True while paintEvent() pushes frame geometry into the scrollbars; their valueChanged
+       handlers must not write the (already applied) value back into the session. */
+    bool m_syncingScrollBars = false;
     mutable QHash<uint32_t, CachedFontEntry> m_fontCache;
     mutable QHash<QString, CachedImageEntry> m_imageCache;
 };

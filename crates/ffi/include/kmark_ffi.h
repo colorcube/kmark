@@ -230,6 +230,8 @@ typedef struct KMarkFrameView {
     float viewport_h;
     float scroll_y;
     float total_height;
+    float scroll_x;    /* horizontal scroll (line modes without word wrap), else 0 */
+    float total_width; /* document width for the horizontal scrollbar */
     KMarkRectF caret_rect;
     const KMarkDrawCmd* cmds_ptr;
     size_t cmds_len;
@@ -464,6 +466,8 @@ void kmark_session_drop_cursor_at(KMarkSession* session, float vx, float vy);
 bool kmark_session_hover_interactive(const KMarkSession* session, float vx, float vy, bool ctrl);
 void kmark_session_set_scroll_y(KMarkSession* session, float scroll_y);
 void kmark_session_scroll_pixels(KMarkSession* session, float delta_y);
+void kmark_session_set_scroll_x(KMarkSession* session, float scroll_x);
+void kmark_session_scroll_pixels_x(KMarkSession* session, float delta_x);
 
 /* Find & Replace */
 void kmark_session_set_search(

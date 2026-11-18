@@ -180,6 +180,8 @@ pub struct DocumentTab {
     pub selection: Selection,
     pub preferred_x: Option<f32>,
     pub scroll_y: f32,
+    /// Horizontal scroll offset (line modes without word wrap only).
+    pub scroll_x: f32,
     pub armed_styles: Vec<ArmedStyle>,
     pub ime_preedit: Option<String>,
     pub history: DocumentHistory,
@@ -247,6 +249,7 @@ impl DocumentTab {
             selection: Selection::collapsed(0),
             preferred_x: None,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             armed_styles: Vec::new(),
             ime_preedit: None,
             history: DocumentHistory::default(),
@@ -280,6 +283,7 @@ impl DocumentTab {
             selection: Selection::collapsed(0),
             preferred_x: None,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             armed_styles: Vec::new(),
             ime_preedit: None,
             history: DocumentHistory::default(),
@@ -381,6 +385,9 @@ impl DocumentTab {
 
 /// Maximum automatic synchronous recovery draft size (4 MB) so huge files stay sub-millisecond.
 const MAX_RECOVERY_DRAFT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Minimum distance between the caret and the left/right text edge when following horizontally.
+const H_SCROLL_MARGIN_PX: f32 = 48.0;
 
 /// Multi-document editor session driving both the native KDE/Qt6 shell and `kmark-cli`.
 pub struct Session {
@@ -555,6 +562,7 @@ impl Session {
             selection: Selection::collapsed(0),
             preferred_x: None,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             armed_styles: Vec::new(),
             ime_preedit: None,
             history: DocumentHistory::default(),
@@ -840,6 +848,23 @@ impl Session {
         }
     }
 
+    pub fn set_scroll_x(&mut self, scroll_x: f32) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.scroll_x = scroll_x.max(0.0);
+        }
+    }
+
+    /// Scrolls horizontally by `delta_x` pixels, clamped to the last frame's document width.
+    pub fn scroll_x_by_pixels(&mut self, delta_x: f32) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let max_scroll = tab
+                .last_frame
+                .as_ref()
+                .map_or(0.0, |f| (f.total_width - f.viewport_w).max(0.0));
+            tab.scroll_x = (tab.scroll_x + delta_x).clamp(0.0, max_scroll);
+        }
+    }
+
     pub fn scroll_by_pixels(&mut self, delta_y: f32) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let max_scroll = tab
@@ -960,6 +985,7 @@ impl Session {
                 selection: sel,
                 preferred_x: None,
                 scroll_y: 0.0,
+                scroll_x: 0.0,
                 armed_styles: Vec::new(),
                 ime_preedit: None,
                 history: DocumentHistory::default(),
@@ -1091,6 +1117,7 @@ impl Session {
                     tab.view_mode = mode;
                     tab.armed_styles.clear();
                     tab.last_frame = None;
+                    tab.scroll_x = 0.0;
                     tab.needs_scroll_to_caret = true;
                 }
                 self.layout_config.view_mode = mode;
@@ -1106,6 +1133,10 @@ impl Session {
             }
             Command::ToggleWordWrap => {
                 self.layout_config.word_wrap = !self.layout_config.word_wrap;
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.scroll_x = 0.0;
+                    tab.needs_scroll_to_caret = true;
+                }
                 return;
             }
             Command::ToggleFocusMode => {
@@ -1797,6 +1828,7 @@ impl Session {
                 viewport_w,
                 viewport_h,
                 scroll_y: tab.scroll_y,
+                scroll_x: tab.scroll_x,
             },
             measurer,
             Some(&mut tab.height_cache),
@@ -1819,10 +1851,31 @@ impl Session {
 
             let max_scroll = (frame.total_height - viewport_h * 0.5).max(0.0);
             desired_scroll = desired_scroll.clamp(0.0, max_scroll);
+
+            // Horizontal follow for unwrapped line modes: keep the caret inside the text area.
+            let line_mode = matches!(tab.view_mode, ViewMode::Source | ViewMode::PlainText);
+            let desired_scroll_x = if line_mode && !self.layout_config.word_wrap {
+                let caret_x = frame.caret_doc_rect.x;
+                let left = tab.scroll_x + frame.gutter_w + H_SCROLL_MARGIN_PX;
+                let right = tab.scroll_x + viewport_w - H_SCROLL_MARGIN_PX;
+                let wanted = if caret_x < left {
+                    caret_x - frame.gutter_w - H_SCROLL_MARGIN_PX
+                } else if caret_x > right {
+                    caret_x - viewport_w + H_SCROLL_MARGIN_PX
+                } else {
+                    tab.scroll_x
+                };
+                wanted.clamp(0.0, (frame.total_width - viewport_w).max(0.0))
+            } else {
+                0.0
+            };
             tab.needs_scroll_to_caret = false;
 
-            if (desired_scroll - tab.scroll_y).abs() > 0.5 {
+            if (desired_scroll - tab.scroll_y).abs() > 0.5
+                || (desired_scroll_x - tab.scroll_x).abs() > 0.5
+            {
                 tab.scroll_y = desired_scroll;
+                tab.scroll_x = desired_scroll_x;
                 frame = build_viewport_frame_cached(
                     &ViewportRequest {
                         rope: &tab.rope,
@@ -1835,6 +1888,7 @@ impl Session {
                         viewport_w,
                         viewport_h,
                         scroll_y: tab.scroll_y,
+                        scroll_x: tab.scroll_x,
                     },
                     measurer,
                     Some(&mut tab.height_cache),
@@ -1868,6 +1922,7 @@ impl Session {
             ime_preedit: tab.ime_preedit.clone(),
             view_mode: tab.view_mode,
             scroll_y_bits: tab.scroll_y.to_bits(),
+            scroll_x_bits: tab.scroll_x.to_bits(),
             needs_scroll_to_caret: tab.needs_scroll_to_caret,
             search_query: self.search.query.clone(),
             search_options: self.search.options,
@@ -1896,6 +1951,7 @@ pub struct RenderStateStamp {
     pub ime_preedit: Option<String>,
     pub view_mode: ViewMode,
     pub scroll_y_bits: u32,
+    pub scroll_x_bits: u32,
     pub needs_scroll_to_caret: bool,
     pub search_query: String,
     pub search_options: SearchOptions,
