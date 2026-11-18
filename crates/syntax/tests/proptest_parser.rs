@@ -40,6 +40,9 @@ impl SplitMix64 {
 /// stay on the incremental window splice + tail-offset shift path rather than
 /// triggering the code-fence full-parse fallback).
 const NON_FENCE_SNIPPETS: &[&str] = &[
+    "-   **Neue Quellen (`x`):**  \n    Starten beim nächsten Tick.\n",
+    "- Punkt mit\nfauler Folgezeile\n  - Unterpunkt\n    eingerückt weiter\n\n",
+    "    eingerückte Zeile\n",
     "",
     "\n",
     "\n\n",
@@ -63,6 +66,9 @@ const NON_FENCE_SNIPPETS: &[&str] = &[
 /// Full snippet set including code fences (opened and unclosed) to also verify
 /// seamless fallback transitions whenever code fences enter or leave the edit window.
 const ALL_SNIPPETS: &[&str] = &[
+    "-   **Neue Quellen (`x`):**  \n    Starten beim nächsten Tick.\n",
+    "- Punkt mit\nfauler Folgezeile\n  - Unterpunkt\n    eingerückt weiter\n\n",
+    "    eingerückte Zeile\n",
     "",
     "\n",
     "\n\n",

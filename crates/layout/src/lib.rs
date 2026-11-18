@@ -98,6 +98,60 @@ mod tests {
     }
 
     #[test]
+    fn list_continuation_lines_align_under_item_text() {
+        // Regression #293: indented continuation lines were a separate paragraph drawn with
+        // visible indentation at the paragraph margin.
+        let md = "-   **Fett:**  \n    Folgezeile im Punkt.\n\nAbsatz.\n";
+        let rope = Rope::from_str(md);
+        let blocks = parse_blocks(&rope);
+        let mut measurer = FallbackMeasurer;
+        let cfg = LayoutConfig {
+            view_mode: ViewMode::Wysiwyg,
+            ..LayoutConfig::default()
+        };
+        let render = |caret: usize, measurer: &mut FallbackMeasurer| {
+            build_viewport_frame(
+                &ViewportRequest {
+                    rope: &rope,
+                    blocks: &blocks,
+                    selection: Selection::collapsed(caret),
+                    ime_preedit: None,
+                    search_matches: &[],
+                    active_match_idx: None,
+                    config: &cfg,
+                    viewport_w: 960.0,
+                    viewport_h: 700.0,
+                    scroll_y: 0.0,
+                },
+                measurer,
+            )
+        };
+
+        let text_x = |frame: &ViewportFrame, needle: &str| {
+            frame.draw_cmds.iter().find_map(|c| match c {
+                DrawCmd::Text { text, x, .. } if text.contains(needle) => Some(*x),
+                _ => None,
+            })
+        };
+        let cont_pos = md.find("Folgezeile").unwrap();
+        let frame = render(md.find("Absatz").unwrap(), &mut measurer);
+        let fett_x = text_x(&frame, "Fett").unwrap();
+        let cont_x = text_x(&frame, "Folgezeile").unwrap();
+        let para_x = text_x(&frame, "Absatz").unwrap();
+        assert!((fett_x - cont_x).abs() < 0.5, "{fett_x} vs {cont_x}");
+        assert!(cont_x > para_x + 10.0);
+
+        // Caret in the hidden indentation sits at the start of the visible continuation text.
+        let at_text = render(cont_pos, &mut measurer).caret_doc_rect;
+        let at_indent = render(cont_pos - 4, &mut measurer).caret_doc_rect;
+        assert!(
+            (at_text.x - at_indent.x).abs() < 0.5,
+            "{at_text:?} vs {at_indent:?}"
+        );
+        assert!((at_text.y - at_indent.y).abs() < 0.5);
+    }
+
+    #[test]
     fn hit_testing_maps_click_on_checkbox_and_code_badge() {
         let md = "- [ ] Klick mich\n\n```rust\nlet x = 1;\n```\n";
         let rope = Rope::from_str(md);

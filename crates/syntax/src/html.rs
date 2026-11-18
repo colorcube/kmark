@@ -32,13 +32,7 @@ pub fn export_html_document(title: &str, rope: &Rope, blocks: &[Block]) -> Strin
             }
             BlockKind::Paragraph { ref lines } => {
                 body.push_str("<p>");
-                for (idx, (_, r)) in lines.iter().enumerate() {
-                    if idx > 0 {
-                        body.push('\n');
-                    }
-                    let raw = rope.slice_to_string(r.clone());
-                    body.push_str(&render_inline_html(&raw));
-                }
+                push_joined_lines(&mut body, rope, lines.iter().map(|(_, r)| r.clone()));
                 body.push_str("</p>\n");
                 i = i.saturating_add(1);
             }
@@ -105,6 +99,7 @@ pub fn export_html_document(title: &str, rope: &Rope, blocks: &[Block]) -> Strin
                         ordered: item_ord,
                         ref task,
                         ref content_range,
+                        ref continuation_lines,
                         ..
                     } = blocks[i].kind
                         && item_ord.is_some() == is_ordered
@@ -114,9 +109,12 @@ pub fn export_html_document(title: &str, rope: &Rope, blocks: &[Block]) -> Strin
                             let checked = if ts.checked { " checked" } else { "" };
                             body.push_str(&format!("<input type=\"checkbox\" disabled{checked}> "));
                         }
-                        body.push_str(&render_inline_html(
-                            &rope.slice_to_string(content_range.clone()),
-                        ));
+                        push_joined_lines(
+                            &mut body,
+                            rope,
+                            std::iter::once(content_range.clone())
+                                .chain(continuation_lines.iter().map(|(_, r)| r.clone())),
+                        );
                         body.push_str("</li>\n");
                         i = i.saturating_add(1);
                     } else {
@@ -279,4 +277,34 @@ fn escape_html(s: &str) -> String {
         }
     }
     out
+}
+
+/// Appends the inline HTML of consecutive source lines, joined by soft line breaks. A line ending
+/// in two or more spaces or a backslash (CommonMark hard break) is followed by `<br>`; on the last
+/// line such markers are kept as plain text, as in CommonMark.
+fn push_joined_lines(
+    body: &mut String,
+    rope: &Rope,
+    ranges: impl Iterator<Item = std::ops::Range<usize>>,
+) {
+    let lines: Vec<String> = ranges.map(|r| rope.slice_to_string(r)).collect();
+    let last = lines.len().saturating_sub(1);
+    for (idx, raw) in lines.iter().enumerate() {
+        if idx == last {
+            body.push_str(&render_inline_html(raw.trim_end_matches(' ')));
+            break;
+        }
+        if let Some(stripped) = raw.strip_suffix('\\') {
+            body.push_str(&render_inline_html(stripped));
+            body.push_str("<br>\n");
+        } else {
+            let trimmed = raw.trim_end_matches(' ');
+            body.push_str(&render_inline_html(trimmed));
+            if raw.len().saturating_sub(trimmed.len()) >= 2 {
+                body.push_str("<br>\n");
+            } else {
+                body.push('\n');
+            }
+        }
+    }
 }

@@ -823,6 +823,61 @@ fn estimate_wrapped_visual_lines(
     ((approx_chars * 1.08) / chars_per_line).ceil().max(1.0)
 }
 
+/// Lays out the continuation lines of a list item, aligned under the item text at `body_x`.
+/// In Live Preview the line holding the caret is shown raw, including its indentation.
+fn layout_list_continuation_lines(
+    ctx: &mut LayoutCtx<'_>,
+    continuation_lines: &[(usize, Range<usize>)],
+    mut y: f32,
+    body_x: f32,
+    body_w: f32,
+    caret_line: usize,
+    text_color: Rgba,
+) -> f32 {
+    let base_font_px = ctx.config.base_font_px;
+    for (l_idx, content_range) in continuation_lines {
+        let line_start = ctx.rope.line_start_byte(*l_idx).min(content_range.start);
+        if ctx.config.view_mode == ViewMode::LivePreview && *l_idx == caret_line {
+            let text_fg = ctx.config.palette.text_fg;
+            y = layout_inline_line(
+                ctx,
+                InlineLineSpec {
+                    line_idx: *l_idx,
+                    doc_range: line_start..content_range.end,
+                    y,
+                    start_x: ctx.content_x,
+                    max_w: ctx.prose_w,
+                    font_px: base_font_px,
+                    base_bold: false,
+                    reveal_raw: true,
+                    base_color: text_fg,
+                },
+            );
+            continue;
+        }
+        let first_idx = ctx.visual_rows.len();
+        y = layout_inline_line(
+            ctx,
+            InlineLineSpec {
+                line_idx: *l_idx,
+                doc_range: content_range.clone(),
+                y,
+                start_x: body_x,
+                max_w: body_w,
+                font_px: base_font_px,
+                base_bold: false,
+                reveal_raw: false,
+                base_color: text_color,
+            },
+        );
+        // The hidden indentation belongs to the first visual row so caret and clicks map there.
+        if let Some(first_row) = ctx.visual_rows.get_mut(first_idx) {
+            first_row.doc_range.start = line_start;
+        }
+    }
+    y
+}
+
 fn estimate_block_height(
     block: &Block,
     prose_w: f32,
@@ -866,13 +921,17 @@ fn estimate_block_height(
             indent_spaces,
             ref task,
             ref content_range,
+            ref continuation_lines,
             ..
         } => {
             let indent_px = (indent_spaces as f32) * (base_font_px * 0.55);
             let slot_px = 24.0 + if task.is_some() { 22.0 } else { 0.0 };
             let avail = (prose_w - indent_px - slot_px).max(80.0);
-            let wrapped =
+            let mut wrapped =
                 estimate_wrapped_visual_lines(content_range.len(), avail, avg_char_px, word_wrap);
+            for (_, r) in continuation_lines {
+                wrapped += estimate_wrapped_visual_lines(r.len(), avail, avg_char_px, word_wrap);
+            }
             wrapped * line_h + 2.0
         }
         BlockKind::BlockQuote {
@@ -1138,15 +1197,24 @@ fn layout_single_block(
             ref task,
             ref content_range,
             line_idx,
+            ref continuation_lines,
         } => {
-            let raw_here = ctx.config.view_mode == ViewMode::LivePreview && line_idx == caret_line;
+            let live = ctx.config.view_mode == ViewMode::LivePreview;
+            let raw_here = live && line_idx == caret_line;
             let indent_px = (indent_spaces as f32) * (base_font_px * 0.55);
             let marker_slot = 24.0f32;
             let task_slot = if task.is_some() { 22.0f32 } else { 0.0f32 };
+            let body_x = content_x + indent_px + marker_slot + task_slot;
+            let body_w = (prose_w - (body_x - content_x)).max(80.0);
+            let text_color = if task.as_ref().is_some_and(|t| t.checked) {
+                ctx.config.palette.muted_fg
+            } else {
+                ctx.config.palette.text_fg
+            };
 
             if raw_here {
                 let text_fg = ctx.config.palette.text_fg;
-                return layout_inline_line(
+                let next_y = layout_inline_line(
                     ctx,
                     InlineLineSpec {
                         line_idx,
@@ -1159,16 +1227,19 @@ fn layout_single_block(
                         reveal_raw: true,
                         base_color: text_fg,
                     },
+                );
+                return layout_list_continuation_lines(
+                    ctx,
+                    continuation_lines,
+                    next_y,
+                    body_x,
+                    body_w,
+                    caret_line,
+                    text_color,
                 ) + 2.0;
             }
 
-            let body_x = content_x + indent_px + marker_slot + task_slot;
             let first_idx = ctx.visual_rows.len();
-            let text_color = if task.as_ref().is_some_and(|t| t.checked) {
-                ctx.config.palette.muted_fg
-            } else {
-                ctx.config.palette.text_fg
-            };
 
             let next_y = layout_inline_line(
                 ctx,
@@ -1177,7 +1248,7 @@ fn layout_single_block(
                     doc_range: content_range.clone(),
                     y,
                     start_x: body_x,
-                    max_w: (prose_w - (body_x - content_x)).max(80.0),
+                    max_w: body_w,
                     font_px: base_font_px,
                     base_bold: false,
                     reveal_raw: false,
@@ -1218,7 +1289,15 @@ fn layout_single_block(
                     });
                 }
             }
-            next_y + 2.0
+            layout_list_continuation_lines(
+                ctx,
+                continuation_lines,
+                next_y,
+                body_x,
+                body_w,
+                caret_line,
+                text_color,
+            ) + 2.0
         }
         BlockKind::BlockQuote {
             alert,
@@ -1719,7 +1798,13 @@ fn compute_caret_rect(
     // Second pass: relaxed match on row range when caret sits between spans (e.g. empty heading body).
     for row in visual_rows {
         if caret_byte >= row.doc_range.start && caret_byte <= row.doc_range.end {
-            let x = row.spans.last().map_or(row.default_x, |s| s.x + s.width);
+            // Before the first span (hidden list marker or indentation) the caret sits at the
+            // start of the visible text; otherwise after the last span.
+            let x = match (row.spans.first(), row.spans.last()) {
+                (Some(first), _) if caret_byte < first.doc_range.start => first.x,
+                (_, Some(last)) => last.x + last.width,
+                _ => row.default_x,
+            };
             return RectF::new(x, row.y_doc, CARET_WIDTH_PX, row.height);
         }
     }

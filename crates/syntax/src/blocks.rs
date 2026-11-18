@@ -147,6 +147,9 @@ pub enum BlockKind {
         task: Option<TaskState>,
         content_range: Range<usize>,
         line_idx: usize,
+        /// Indented or lazy continuation lines belonging to this item: `(line_idx, content_range)`
+        /// where `content_range` excludes the leading indentation.
+        continuation_lines: Vec<(usize, Range<usize>)>,
     },
     Table(TableBlock),
 }
@@ -370,13 +373,29 @@ fn parse_window_lines(lines: &[(Range<usize>, String)]) -> Vec<Block> {
         }
 
         // 7. List item (unordered `-`, `*`, `+`, ordered `1.`, `1)`, task `- [ ]`, `- [x]`)
-        if let Some(item) = parse_list_item(i, line_range.clone(), line_text) {
+        if let Some(mut item) = parse_list_item(i, line_range.clone(), line_text) {
+            let start_i = i;
+            let mut end_b = line_range.end;
+            i = i.saturating_add(1);
+            let mut continuation = Vec::new();
+            while i < total_lines && !interrupts_paragraph(lines, i) {
+                let (ref r, ref t) = lines[i];
+                let indent_bytes = t.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+                continuation.push((i, r.start.saturating_add(indent_bytes)..r.end));
+                end_b = r.end;
+                i = i.saturating_add(1);
+            }
+            if let BlockKind::ListItem {
+                continuation_lines, ..
+            } = &mut item
+            {
+                *continuation_lines = continuation;
+            }
             blocks.push(Block {
-                byte_range: line_range.clone(),
-                line_range: i..i.saturating_add(1),
+                byte_range: line_range.start..end_b,
+                line_range: start_i..i,
                 kind: item,
             });
-            i = i.saturating_add(1);
             continue;
         }
 
@@ -407,16 +426,7 @@ fn parse_window_lines(lines: &[(Range<usize>, String)]) -> Vec<Block> {
         i = i.saturating_add(1);
         while i < total_lines {
             let (ref r, ref t) = lines[i];
-            if is_blank(t)
-                || parse_fence_open(t).is_some()
-                || parse_atx_heading(t).is_some()
-                || is_thematic_break(t)
-                || parse_blockquote_prefix(t).is_some()
-                || parse_list_item(i, r.clone(), t).is_some()
-                || (i.saturating_add(1) < total_lines
-                    && looks_like_table_row(t)
-                    && parse_table_delimiter(&lines[i.saturating_add(1)].1).is_some())
-            {
+            if interrupts_paragraph(lines, i) {
                 break;
             }
             // If current line in `p_lines` (when single) is followed by setext underline, break before setext.
@@ -629,6 +639,24 @@ fn parse_alert_marker(first_line_body: &str) -> (Option<AlertKind>, Option<Strin
     (kind, title)
 }
 
+/// Returns `true` if line `i` cannot continue a paragraph (or list item text) because it is blank
+/// or starts a new block: fence, ATX heading, thematic break, blockquote, list item, or table.
+fn interrupts_paragraph(lines: &[(Range<usize>, String)], i: usize) -> bool {
+    let Some((r, t)) = lines.get(i) else {
+        return true;
+    };
+    is_blank(t)
+        || parse_fence_open(t).is_some()
+        || parse_atx_heading(t).is_some()
+        || is_thematic_break(t)
+        || parse_blockquote_prefix(t).is_some()
+        || parse_list_item(i, r.clone(), t).is_some()
+        || (looks_like_table_row(t)
+            && lines
+                .get(i.saturating_add(1))
+                .is_some_and(|(_, next)| parse_table_delimiter(next).is_some()))
+}
+
 fn parse_list_item(line_idx: usize, line_range: Range<usize>, line: &str) -> Option<BlockKind> {
     let mut indent = 0usize;
     let mut byte_idx = 0usize;
@@ -722,6 +750,7 @@ fn parse_list_item(line_idx: usize, line_range: Range<usize>, line: &str) -> Opt
         task,
         content_range: line_range.start.saturating_add(content_start_rel)..line_range.end,
         line_idx,
+        continuation_lines: Vec::new(),
     })
 }
 
@@ -927,11 +956,16 @@ impl Block {
                 task,
                 content_range,
                 line_idx,
+                continuation_lines,
                 ..
             } => {
                 *line_idx = shift_usize(*line_idx, line_delta);
                 shift_range(marker_range, byte_delta);
                 shift_range(content_range, byte_delta);
+                for (l_idx, l_range) in continuation_lines {
+                    *l_idx = shift_usize(*l_idx, line_delta);
+                    shift_range(l_range, byte_delta);
+                }
                 if let Some(t) = task {
                     shift_range(&mut t.bracket_range, byte_delta);
                 }

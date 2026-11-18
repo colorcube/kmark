@@ -121,6 +121,82 @@ mod tests {
     }
 
     #[test]
+    fn list_item_keeps_indented_and_lazy_continuation_lines() {
+        // Regression #293: continuation lines used to become separate paragraphs.
+        let md = "\
+-   **Neue Quellen (`x`):**  
+    Starten beim nächsten Tick.
+- Zweiter Punkt
+faule Folgezeile
+  - Unterpunkt
+    weiter im Unterpunkt
+
+Danach ein Absatz.
+";
+        let rope = Rope::from_str(md);
+        let blocks = parse_blocks(&rope);
+        let items: Vec<&Block> = blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect();
+        assert_eq!(items.len(), 3, "{blocks:#?}");
+
+        let conts: Vec<Vec<String>> = items
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::ListItem {
+                    continuation_lines, ..
+                } => continuation_lines
+                    .iter()
+                    .map(|(_, r)| rope.slice_to_string(r.clone()))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(conts[0], vec!["Starten beim nächsten Tick."]);
+        assert_eq!(conts[1], vec!["faule Folgezeile"]);
+        assert_eq!(conts[2], vec!["weiter im Unterpunkt"]);
+        assert_eq!(items[0].line_range, 0..2);
+        assert_eq!(items[2].line_range, 4..6);
+
+        // The trailing paragraph after the blank line stays a separate block.
+        assert!(matches!(
+            blocks.last().map(|b| &b.kind),
+            Some(BlockKind::BlankLines | BlockKind::Paragraph { .. })
+        ));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+        );
+
+        let html = export_html_document("t", &rope, &blocks);
+        assert!(
+            html.contains("<br>\nStarten beim nächsten Tick.</li>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<li>Zweiter Punkt\nfaule Folgezeile</li>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn block_starts_still_interrupt_list_items() {
+        let md = "- Punkt\n# Überschrift\n- Punkt\n> Zitat\n- Punkt\n```\ncode\n```\n";
+        let rope = Rope::from_str(md);
+        let blocks = parse_blocks(&rope);
+        for b in &blocks {
+            if let BlockKind::ListItem {
+                continuation_lines, ..
+            } = &b.kind
+            {
+                assert!(continuation_lines.is_empty(), "{blocks:#?}");
+            }
+        }
+    }
+
+    #[test]
     fn emphasis_containing_inline_code_still_closes() {
         // Regression #289: a code span inside `**…**` / `*…*` aborted the closer search,
         // so the delimiters were drawn literally and the text was not bold/italic.
