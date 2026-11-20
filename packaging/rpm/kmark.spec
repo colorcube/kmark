@@ -1,5 +1,5 @@
 Name:           kmark
-Version:        0.1.2
+Version:        0.1.3
 Release:        1%{?dist}
 Summary:        Native WYSIWYG Markdown and plain-text editor for KDE Plasma
 License:        GPL-3.0-or-later
@@ -43,6 +43,12 @@ Frameworks 6 shell.
 %{_datadir}/metainfo/de.colorcube.kmark.metainfo.xml
 
 %changelog
+* Fri Nov 20 2026 René Fritz <rf@colorcube.de> - 0.1.3-1
+- Checkable Paragraph and H1-H6 toolbar icon buttons
+- Typographic paragraph spacing and WYSIWYG Enter vs Shift+Enter
+- Lossless Markdown document formatter (Ctrl+Shift+F and kmark-cli format)
+- Unindented column-0 paragraphs after lists
+
 * Wed Nov 18 2026 René Fritz <rf@colorcube.de> - 0.1.2-1
 - Soft wrap / horizontal scrolling in Source and TXT mode
 - Ardoise appearance presets and heading/inline-code colors

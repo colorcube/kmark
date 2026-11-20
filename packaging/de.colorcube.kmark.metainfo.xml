@@ -43,6 +43,11 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.1.3" date="2026-11-20">
+      <description>
+        <p>Checkable Paragraph and H1-H6 toolbar icon buttons, typographic paragraph spacing with WYSIWYG Enter vs Shift+Enter, lossless Markdown document formatter (Ctrl+Shift+F and kmark-cli format), and unindented paragraphs after lists.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-11-18">
       <description>
         <p>Soft wrap and horizontal scrolling in Source/TXT mode, Ardoise appearance presets with heading colors, external file change detection with reload, and Markdown rendering fixes for emphasis with inline code and list continuation lines.</p>
