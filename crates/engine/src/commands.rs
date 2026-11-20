@@ -438,6 +438,8 @@ pub fn apply_inline_toggle(rope: &Rope, selection: Selection, style: ArmedStyle)
 }
 
 /// Sets ATX heading level (`0` = paragraph, `1..=6` = `#..######`). Toggles back to `0` if already at `level`.
+/// When applying a heading (`1..=6`), ensures a blank line before (unless on line 0) and after
+/// (when followed by a non-blank line) per Markdown `MD022` (`blanks-around-headings`).
 #[must_use]
 pub fn apply_heading(rope: &Rope, selection: Selection, level: u8) -> (Rope, Selection) {
     let clamped_level = level.min(6);
@@ -458,6 +460,17 @@ pub fn apply_heading(rope: &Rope, selection: Selection, level: u8) -> (Rope, Sel
         clamped_level
     };
 
+    let is_blank_str = |s: &str| s.bytes().all(|b| b == b' ' || b == b'\t');
+    let need_blank_before = target_level > 0
+        && lc.line > 0
+        && !is_blank_str(&rope.line_text(lc.line.saturating_sub(1)));
+    let need_blank_after = target_level > 0
+        && lc.line.saturating_add(1) < rope.line_count()
+        && !is_blank_str(&rope.line_text(lc.line.saturating_add(1)));
+
+    let lead_nl = if need_blank_before { "\n" } else { "" };
+    let trail_nl = if need_blank_after { "\n" } else { "" };
+
     let clean_body = line_text.get(prefix_bytes..).unwrap_or(&line_text);
     let new_prefix = if target_level == 0 {
         String::new()
@@ -465,17 +478,18 @@ pub fn apply_heading(rope: &Rope, selection: Selection, level: u8) -> (Rope, Sel
         format!("{} ", "#".repeat(usize::from(target_level)))
     };
 
-    let new_line = format!("{new_prefix}{clean_body}");
+    let new_heading_line = format!("{new_prefix}{clean_body}");
+    let replacement = format!("{lead_nl}{new_heading_line}{trail_nl}");
     let mut next = rope.clone();
-    next.replace_range(line_range.clone(), &new_line);
+    next.replace_range(line_range.clone(), &replacement);
 
+    let heading_start = line_range.start.saturating_add(lead_nl.len());
     let old_rel = selection.head.saturating_sub(line_range.start);
     let body_rel = old_rel.saturating_sub(prefix_bytes);
-    let new_caret = line_range
-        .start
+    let new_caret = heading_start
         .saturating_add(new_prefix.len())
         .saturating_add(body_rel)
-        .min(line_range.start.saturating_add(new_line.len()));
+        .min(heading_start.saturating_add(new_heading_line.len()));
     let clamped_caret = next.clamp_char_boundary(new_caret);
 
     (next, Selection::collapsed(clamped_caret))

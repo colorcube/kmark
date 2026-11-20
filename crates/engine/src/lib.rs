@@ -745,4 +745,41 @@ mod tests {
                 .starts_with("Erster AbsatzZweiter Absatz")
         );
     }
+
+    #[test]
+    fn apply_heading_inserts_blank_lines_around_headings_except_line_zero() {
+        let mut session = Session::new_headless();
+        session.insert_text("Titel oben\nAbsatz mitte\nUnterabschnitt\nAbsatz unten");
+
+        // Line 0 heading: no blank line above, 1 blank line inserted below
+        session.jump_to_byte_offset(2);
+        session.execute_command(Command::SetHeading(1));
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "# Titel oben\n\nAbsatz mitte\nUnterabschnitt\nAbsatz unten"
+        );
+
+        // Mid-document heading: blank line inserted both above and below, no duplicates on level change
+        let sub_pos = session
+            .active_doc()
+            .unwrap()
+            .rope
+            .to_string_lossless()
+            .find("Unterabschnitt")
+            .unwrap()
+            + 3;
+        session.jump_to_byte_offset(sub_pos);
+        session.execute_command(Command::SetHeading(2));
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "# Titel oben\n\nAbsatz mitte\n\n## Unterabschnitt\n\nAbsatz unten"
+        );
+
+        // Changing H2 -> H3 preserves existing blank lines without adding duplicates
+        session.execute_command(Command::SetHeading(3));
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "# Titel oben\n\nAbsatz mitte\n\n### Unterabschnitt\n\nAbsatz unten"
+        );
+    }
 }

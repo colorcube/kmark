@@ -250,6 +250,26 @@ pub fn handle_enter(
         );
     }
 
+    if matches!(view_mode, ViewMode::LivePreview)
+        && !in_fence
+        && !modifiers.shift
+        && !is_before_heading_content(blocks, range.start)
+        && blocks
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::Heading { .. }) && b.line_range.contains(&lc.line))
+    {
+        let next_already_blank = lc.line.saturating_add(1) < rope.line_count()
+            && is_line_blank(rope, lc.line.saturating_add(1));
+        let inserted = if next_already_blank { "\n" } else { "\n\n" };
+        let mut next = rope.clone();
+        next.replace_range(range.clone(), inserted);
+        return (
+            next,
+            Selection::collapsed(range.start.saturating_add(inserted.len())),
+            EditGroup::Discrete,
+        );
+    }
+
     let leading_ws: String = if matches!(view_mode, ViewMode::Source) || in_fence {
         line_prefix
             .chars()
