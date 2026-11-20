@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Paragraph & Heading Toolbar Icon Buttons**: Replaced the toolbar heading dropdown with 7 checkable, HiDPI vector icon buttons (`¶`, `H1`–`H6`) highlighting the active block level (`Ctrl+0`–`Ctrl+6`).
+
+### Fixed
+- **Exiting Lists via `2× Enter`**: Pressing `Enter` on an empty list item now inserts a separating blank line so subsequent text starts an unindented paragraph instead of a lazy list continuation; in nested lists, `Enter` outdents one level before exiting.
+
 ## [0.1.2] - 2026-11-18
 
 ### Added

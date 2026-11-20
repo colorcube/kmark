@@ -10,7 +10,6 @@ using KMarkWindowBase = QMainWindow;
 
 #include <QAction>
 #include <QCheckBox>
-#include <QComboBox>
 #include <QDockWidget>
 #include <QFileSystemModel>
 #include <QFileSystemWatcher>
@@ -255,7 +254,6 @@ private:
 
     /* Formatting toolbar widgets */
     QToolBar* m_mainToolBar = nullptr;
-    QComboBox* m_headingCombo = nullptr;
     QAction* m_actTableToolbarSection = nullptr;
     QToolButton* m_btnModeWysiwyg = nullptr;
     QToolButton* m_btnModeLive = nullptr;

@@ -4,6 +4,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QCursor>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -25,6 +26,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPen>
 #include <QPolygonF>
 #include <QPrintDialog>
@@ -405,6 +407,60 @@ QIcon makeCoreToolbarIcon(CoreIconKind kind, const QPalette& pal) {
             break;
         }
     }
+
+    return QIcon(pm);
+}
+
+QIcon makeBlockLevelIcon(int level, const QPalette& pal) {
+    QPixmap pm(48, 48);
+    pm.setDevicePixelRatio(2.0);
+    pm.fill(Qt::transparent);
+
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+
+    QColor fg = pal.color(QPalette::WindowText);
+    fg.setAlpha(230);
+
+    if (level <= 0) {
+        /* Crisp geometric pilcrow (¶) for Paragraph */
+        QPainterPath bowl;
+        bowl.moveTo(12.2, 4.3);
+        bowl.lineTo(10.0, 4.3);
+        bowl.arcTo(QRectF(6.0, 4.3, 8.0, 7.8), 90.0, 180.0);
+        bowl.lineTo(12.2, 12.1);
+        bowl.closeSubpath();
+        p.setPen(Qt::NoPen);
+        p.setBrush(fg);
+        p.drawPath(bowl);
+
+        p.setPen(QPen(fg, 1.85, Qt::SolidLine, Qt::RoundCap));
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(10.2, 5.15), QPointF(17.4, 5.15));
+        p.drawLine(QPointF(12.2, 5.15), QPointF(12.2, 18.8));
+        p.drawLine(QPointF(15.6, 5.15), QPointF(15.6, 18.8));
+        return QIcon(pm);
+    }
+
+    /* Crisp geometric 'H' + baseline-aligned level numeral 1..6 */
+    p.setPen(QPen(fg, 2.0, Qt::SolidLine, Qt::RoundCap));
+    p.setBrush(Qt::NoBrush);
+    p.drawLine(QPointF(3.8, 5.6), QPointF(3.8, 18.4));
+    p.drawLine(QPointF(11.0, 5.6), QPointF(11.0, 18.4));
+    p.drawLine(QPointF(3.8, 12.0), QPointF(11.0, 12.0));
+
+    QFont f = QApplication::font();
+    f.setPixelSize(11);
+    f.setWeight(QFont::DemiBold);
+    p.setFont(f);
+    p.setPen(fg);
+
+    const QString num = QString::number(std::clamp(level, 1, 6));
+    const QFontMetricsF fm(f);
+    const double numW = fm.horizontalAdvance(num);
+    const double numX = 12.8 + std::max(0.0, (8.2 - numW) * 0.5);
+    p.drawText(QPointF(numX, 18.5), num);
 
     return QIcon(pm);
 }
@@ -1362,6 +1418,7 @@ void MainWindow::setupMenusAndToolbars() {
     m_headingMenu = m_formatMenu->addMenu(QString());
     for (int lvl = 0; lvl <= 6; ++lvl) {
         auto* actH = m_headingMenu->addAction(QString());
+        actH->setCheckable(true);
         actH->setShortcut(QKeySequence(QStringLiteral("Ctrl+%1").arg(lvl)));
         connect(actH, &QAction::triggered, this, [this, lvl]() {
             dispatchCommand(static_cast<uint32_t>(KMARK_ACT_HEADING_0 + lvl));
@@ -1529,14 +1586,9 @@ void MainWindow::setupMenusAndToolbars() {
     m_mainToolBar->addAction(m_actRedo);
     m_mainToolBar->addSeparator();
 
-    m_headingCombo = new QComboBox(m_mainToolBar);
-    m_headingCombo->setMinimumWidth(134);
-    connect(m_headingCombo, &QComboBox::currentIndexChanged, this, [this](int idx) {
-        if (!m_updatingUi && idx >= 0 && idx <= 6) {
-            dispatchCommand(static_cast<uint32_t>(KMARK_ACT_HEADING_0 + idx));
-        }
-    });
-    m_mainToolBar->addWidget(m_headingCombo);
+    for (QAction* actH : m_actHeadings) {
+        m_mainToolBar->addAction(actH);
+    }
     m_mainToolBar->addSeparator();
 
     m_mainToolBar->addAction(m_actBold);
@@ -1707,9 +1759,12 @@ void MainWindow::retranslateUi() {
 
     m_headingMenu->setTitle(T("&Heading", "&Überschrift"));
     m_actHeadings[0]->setText(T("Paragraph (Body Text)", "Absatz (Normaltext)"));
+    m_actHeadings[0]->setToolTip(T("Paragraph (Ctrl+0)", "Absatz (Strg+0)"));
     for (int lvl = 1; lvl <= 6; ++lvl) {
-        m_actHeadings[static_cast<size_t>(lvl)]->setText(
-            T("Heading %1", "Überschrift %1").arg(lvl)
+        auto* actH = m_actHeadings[static_cast<size_t>(lvl)];
+        actH->setText(T("Heading %1", "Überschrift %1").arg(lvl));
+        actH->setToolTip(
+            T("Heading %1 (Ctrl+%1)", "Überschrift %1 (Strg+%1)").arg(lvl)
         );
     }
 
@@ -1754,22 +1809,6 @@ void MainWindow::retranslateUi() {
     m_actAbout->setText(T("About &KMark", "Über &KMark"));
     m_actAboutQt->setText(T("About &Qt", "Über &Qt"));
 
-    {
-        const QSignalBlocker b(m_headingCombo);
-        const int cur = std::max(0, m_headingCombo->currentIndex());
-        m_headingCombo->clear();
-        m_headingCombo->addItems({
-            T("Paragraph", "Absatz"),
-            T("Heading 1", "Überschrift 1"),
-            T("Heading 2", "Überschrift 2"),
-            T("Heading 3", "Überschrift 3"),
-            T("Heading 4", "Überschrift 4"),
-            T("Heading 5", "Überschrift 5"),
-            T("Heading 6", "Überschrift 6"),
-        });
-        m_headingCombo->setCurrentIndex(cur);
-    }
-
     m_btnModeWysiwyg->setText(T("Formatted", "Formatiert"));
     m_btnModeLive->setText(T("Live", "Live"));
     m_btnModeSource->setText(T("Source", "Quelltext"));
@@ -1786,6 +1825,7 @@ void MainWindow::dispatchCommand(uint32_t cmdId) {
         syncSettingsFromRuntime(true);
     }
     syncOutlineTree();
+    syncUiState();
     m_viewport->notifyDocumentChanged();
     m_viewport->setFocus();
 }
@@ -1812,9 +1852,11 @@ void MainWindow::syncUiState() {
     m_actHighlight->setChecked(st.highlight);
     m_actInlineCode->setChecked(st.inline_code);
 
-    {
-        const QSignalBlocker b(m_headingCombo);
-        m_headingCombo->setCurrentIndex(std::clamp(static_cast<int>(st.heading_level), 0, 6));
+    const int activeHeading = std::clamp(static_cast<int>(st.heading_level), 0, 6);
+    for (int lvl = 0; lvl <= 6; ++lvl) {
+        if (m_actHeadings[static_cast<size_t>(lvl)] != nullptr) {
+            m_actHeadings[static_cast<size_t>(lvl)]->setChecked(lvl == activeHeading);
+        }
     }
 
     switch (st.view_mode) {
@@ -3224,6 +3266,12 @@ void MainWindow::refreshToolbarIcons() {
     setCore(m_actLink, CoreIconKind::Link);
     setCore(m_actImage, CoreIconKind::Image);
     setCore(m_actFence, CoreIconKind::CodeFence);
+
+    for (int lvl = 0; lvl <= 6; ++lvl) {
+        if (m_actHeadings[static_cast<size_t>(lvl)] != nullptr) {
+            m_actHeadings[static_cast<size_t>(lvl)]->setIcon(makeBlockLevelIcon(lvl, pal));
+        }
+    }
 
     if (m_actInsTable != nullptr) {
         m_actInsTable->setIcon(makeTableActionIcon(TableIconKind::InsertTable, pal));
