@@ -200,20 +200,64 @@ pub fn handle_enter(
         }
     }
 
-    // Standard newline preserving leading spaces in code fences / source mode
+    // Standard newline / WYSIWYG paragraph break vs. Shift+Enter line break
     let range = selection.range();
     let lc = rope.byte_to_line_col(range.start);
     let line_range = rope.line_byte_range(lc.line);
     let line_prefix = rope.slice_to_string(line_range.start..range.start);
-    let leading_ws: String =
-        if matches!(view_mode, ViewMode::Source) || is_in_code_fence(blocks, range.start) {
-            line_prefix
-                .chars()
-                .take_while(|c| *c == ' ' || *c == '\t')
-                .collect()
+    let in_fence = is_in_code_fence(blocks, range.start);
+
+    if matches!(view_mode, ViewMode::Wysiwyg) && !in_fence {
+        if modifiers.shift {
+            let in_para = blocks.iter().any(|b| {
+                matches!(b.kind, BlockKind::Paragraph { .. }) && b.line_range.contains(&lc.line)
+            });
+            let inserted = if in_para && !line_prefix.trim().is_empty() {
+                "  \n"
+            } else {
+                "\n"
+            };
+            let mut next = rope.clone();
+            next.replace_range(range.clone(), inserted);
+            return (
+                next,
+                Selection::collapsed(range.start.saturating_add(inserted.len())),
+                EditGroup::Discrete,
+            );
+        }
+
+        if selection.is_empty() && is_before_heading_content(blocks, range.start) {
+            let mut next = rope.clone();
+            next.replace_range(line_range.start..line_range.start, "\n");
+            return (
+                next,
+                Selection::collapsed(range.start.saturating_add(1)),
+                EditGroup::Discrete,
+            );
+        }
+
+        let inserted = if !line_prefix.trim().is_empty() {
+            "\n\n"
         } else {
-            String::new()
+            "\n"
         };
+        let mut next = rope.clone();
+        next.replace_range(range.clone(), inserted);
+        return (
+            next,
+            Selection::collapsed(range.start.saturating_add(inserted.len())),
+            EditGroup::Discrete,
+        );
+    }
+
+    let leading_ws: String = if matches!(view_mode, ViewMode::Source) || in_fence {
+        line_prefix
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect()
+    } else {
+        String::new()
+    };
 
     let inserted = format!("\n{leading_ws}");
     let mut next = rope.clone();
@@ -230,6 +274,21 @@ fn is_in_code_fence(blocks: &[Block], byte_offset: usize) -> bool {
         byte_offset >= b.byte_range.start
             && byte_offset <= b.byte_range.end
             && matches!(b.kind, BlockKind::CodeFence { .. })
+    })
+}
+
+fn is_before_heading_content(blocks: &[Block], byte_offset: usize) -> bool {
+    blocks.iter().any(|b| match b.kind {
+        BlockKind::Heading {
+            ref prefix_range,
+            ref content_range,
+            ..
+        } => {
+            prefix_range.end > prefix_range.start
+                && byte_offset >= prefix_range.start
+                && byte_offset <= content_range.start
+        }
+        _ => false,
     })
 }
 
@@ -557,6 +616,15 @@ pub fn step_horizontal(
     };
 
     if matches!(view_mode, ViewMode::Wysiwyg) && next != pos {
+        let sep_lc = rope.byte_to_line_col(next);
+        if is_hidden_wysiwyg_separator_line(rope, sep_lc.line) {
+            next = if forward {
+                rope.line_start_byte(sep_lc.line.saturating_add(1))
+            } else {
+                rope.line_byte_range(sep_lc.line.saturating_sub(1)).end
+            };
+        }
+
         let lc = rope.byte_to_line_col(next);
         let line_range = rope.line_byte_range(lc.line);
         let line_text = rope.slice_to_string(line_range.clone());
@@ -586,6 +654,19 @@ pub fn step_horizontal(
     }
 
     next
+}
+
+fn is_line_blank(rope: &Rope, line_idx: usize) -> bool {
+    rope.slice_to_string(rope.line_byte_range(line_idx))
+        .bytes()
+        .all(|b| b == b' ' || b == b'\t')
+}
+
+fn is_hidden_wysiwyg_separator_line(rope: &Rope, line_idx: usize) -> bool {
+    if line_idx == 0 || line_idx.saturating_add(1) >= rope.line_count() {
+        return false;
+    }
+    is_line_blank(rope, line_idx) && !is_line_blank(rope, line_idx.saturating_sub(1))
 }
 
 /// Smart `Backspace` / `Delete`, cleaning up empty paired delimiters in `Wysiwyg` mode.

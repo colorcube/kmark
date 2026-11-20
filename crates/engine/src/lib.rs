@@ -679,4 +679,70 @@ mod tests {
         );
         assert!(session.active_doc().unwrap().is_dirty());
     }
+
+    #[test]
+    fn wysiwyg_enter_starts_paragraph_shift_enter_breaks_line_and_backspace_merges() {
+        let mut session = Session::new_headless();
+        session.execute_command(Command::SetViewMode(ViewMode::Wysiwyg));
+
+        // Enter in Wysiwyg creates a real Markdown paragraph (`\n\n`)
+        session.insert_text("Erster Absatz");
+        session.handle_key(KeyCode::Enter, KeyModifiers::default());
+        session.insert_text("Zweiter Absatz");
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            "Erster Absatz\n\nZweiter Absatz"
+        );
+        assert_eq!(
+            session
+                .active_doc()
+                .unwrap()
+                .blocks
+                .iter()
+                .filter(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+                .count(),
+            2
+        );
+
+        // Shift+Enter inside a paragraph inserts a hard line break (`  \n`) within the SAME paragraph
+        session.handle_key(
+            KeyCode::Enter,
+            KeyModifiers {
+                shift: true,
+                ..KeyModifiers::default()
+            },
+        );
+        session.insert_text("Zweite Zeile im zweiten Absatz");
+        assert_eq!(
+            session
+                .active_doc()
+                .unwrap()
+                .blocks
+                .iter()
+                .filter(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+                .count(),
+            2
+        );
+
+        // Left / Right and Backspace step across the hidden `\n\n` paragraph separator in 1 press!
+        let second_start = "Erster Absatz\n\n".len();
+        session.jump_to_byte_offset(second_start);
+        session.handle_key(KeyCode::Left, KeyModifiers::default());
+        assert_eq!(
+            session.active_doc().unwrap().selection.head,
+            "Erster Absatz".len()
+        );
+        session.handle_key(KeyCode::Right, KeyModifiers::default());
+        assert_eq!(session.active_doc().unwrap().selection.head, second_start);
+
+        session.handle_key(KeyCode::Backspace, KeyModifiers::default());
+        assert!(
+            session
+                .active_doc()
+                .unwrap()
+                .rope
+                .to_string_lossless()
+                .starts_with("Erster AbsatzZweiter Absatz")
+        );
+    }
 }

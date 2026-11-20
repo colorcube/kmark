@@ -59,8 +59,8 @@ KMark unterstützt sowohl **ATX-Überschriften** (`#` bis `######`) als auch zwe
 
 ## 3. Absätze, Zeilenumbrüche & Trennlinien
 
-- **Absatzwechsel**: Eine **Leerzeile** zwischen zwei Textblöcken erzeugt einen neuen Absatz.
-- **Zeilenumbruch**: Im Editor bricht <kbd>Enter</kbd> direkt in die nächste Zeile um; in Listen und Zitaten setzt <kbd>Enter</kbd> das Präfix automatisch fort.
+- **Absatzwechsel**: Im **Formatierten Modus** startet <kbd>Enter</kbd> direkt einen neuen Absatz mit sichtbarem Absatzabstand (im Markdown-Quelltext durch eine Leerzeile getrennt).
+- **Zeilenumbruch im selben Absatz**: <kbd>Shift+Enter</kbd> erzeugt einen einfachen Zeilenumbruch (`  \n`) ohne Absatzabstand; in Listen und Zitaten setzt <kbd>Enter</kbd> das Präfix automatisch fort.
 - **Horizontale Trennlinie**: Drei oder mehr Bindestriche `---`, Sternchen `***` oder Unterstriche `___` allein auf einer Zeile erzeugen eine horizontale Linie (`Format -> Trennlinie`).
 
 ---
@@ -241,7 +241,8 @@ KMark supports both **ATX headings** (`#` through `######`) and two-line **Setex
 
 ## 3. Paragraphs, Line Breaks & Horizontal Rules
 
-- **Paragraphs**: Separate paragraphs with one or more **blank lines**.
+- **Paragraphs**: In **Formatted (WYSIWYG)** mode, pressing <kbd>Enter</kbd> starts a new paragraph with visible paragraph spacing (separated by a blank line in Markdown).
+- **Line Breaks**: Press <kbd>Shift+Enter</kbd> to insert a line break (`  \n`) within the same paragraph without extra spacing.
 - **Smart Continuation**: Pressing <kbd>Enter</kbd> inside bullet lists, numbered lists, task lists, or blockquotes continues the structure automatically; pressing <kbd>Enter</kbd> again on an empty list item exits the list cleanly.
 - **Horizontal Rules**: Place `---`, `***`, or `___` alone on a line (`Format -> Horizontal Rule`).
 

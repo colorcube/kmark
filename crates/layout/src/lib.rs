@@ -160,6 +160,64 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_spacing_is_distinct_from_line_breaks_and_hides_separator_line() {
+        let md = "Absatz1Zeile1  \nAbsatz1Zeile2\n\nAbsatz2\n- Punkt1\n- Punkt2\nAbsatz3";
+        let rope = Rope::from_str(md);
+        let blocks = parse_blocks(&rope);
+        let mut measurer = FallbackMeasurer;
+        let cfg = LayoutConfig {
+            view_mode: ViewMode::Wysiwyg,
+            ..LayoutConfig::default()
+        };
+        let frame = build_viewport_frame(
+            &ViewportRequest {
+                rope: &rope,
+                blocks: &blocks,
+                selection: Selection::collapsed(0),
+                ime_preedit: None,
+                search_matches: &[],
+                active_match_idx: None,
+                config: &cfg,
+                viewport_w: 960.0,
+                viewport_h: 700.0,
+                scroll_y: 0.0,
+                scroll_x: 0.0,
+            },
+            &mut measurer,
+        );
+
+        // No dead visual row on the hidden `\n\n` separator line (line 2):
+        // visible rows are only lines 0, 1, 3, 4, 5, 6!
+        let row_lines: Vec<usize> = frame.visual_rows.iter().map(|r| r.line_idx).collect();
+        assert_eq!(row_lines, vec![0, 1, 3, 4, 5, 6]);
+
+        let line_break_dy = frame.visual_rows[1].y_doc - frame.visual_rows[0].y_doc;
+        let para_gap_dy = frame.visual_rows[2].y_doc - frame.visual_rows[1].y_doc;
+        let before_list_dy = frame.visual_rows[3].y_doc - frame.visual_rows[2].y_doc;
+        let within_list_dy = frame.visual_rows[4].y_doc - frame.visual_rows[3].y_doc;
+        let after_list_dy = frame.visual_rows[5].y_doc - frame.visual_rows[4].y_doc;
+
+        // Paragraph break & list boundaries have clear vertical spacing (>= 11 px more than a line break),
+        // while lines inside one paragraph and items inside one list stay compact!
+        assert!(
+            para_gap_dy >= line_break_dy + 11.0,
+            "{para_gap_dy} vs {line_break_dy}"
+        );
+        assert!(
+            before_list_dy >= line_break_dy + 11.0,
+            "{before_list_dy} vs {line_break_dy}"
+        );
+        assert!(
+            after_list_dy >= line_break_dy + 11.0,
+            "{after_list_dy} vs {line_break_dy}"
+        );
+        assert!(
+            within_list_dy <= line_break_dy + 3.0,
+            "{within_list_dy} vs {line_break_dy}"
+        );
+    }
+
+    #[test]
     fn heading_and_inline_code_colors_follow_palette() {
         let md = "# Eins\n\n## Zwei\n\n#### Vier\n\nText mit `code` und Ende.\n";
         let rope = Rope::from_str(md);

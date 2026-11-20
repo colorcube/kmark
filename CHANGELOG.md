@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Paragraph & Heading Toolbar Icon Buttons**: Replaced the toolbar heading dropdown with 7 checkable, HiDPI vector icon buttons (`¶`, `H1`–`H6`) highlighting the active block level (`Ctrl+0`–`Ctrl+6`).
+- **Typographic Paragraph Spacing & WYSIWYG `Enter` / `Shift+Enter`**: Paragraphs and list boundaries now render with clear vertical paragraph spacing (`~0.58×` line height) without a dead blank cursor row between paragraphs; in Formatted (`WYSIWYG`) mode, `Enter` starts a new paragraph (`\n\n`) while `Shift+Enter` inserts a soft-spaced line break (`  \n`) inside the same paragraph.
 
 ### Fixed
 - **Unindented Paragraphs After Lists (`#316`)**: Only indented lines (`>= 2` columns) continue a list item; unindented column-0 text after a list (`Absatz vorher\n- Aufzählung\nAbsatz danach`) starts a new paragraph directly without requiring a blank line (`Shift+Enter` inside a list item inserts an indented continuation line; `Enter` on an empty nested item outdents one level).

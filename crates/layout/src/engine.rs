@@ -481,6 +481,9 @@ impl BlockHeightCache {
         default_line_h: f32,
         word_wrap: bool,
     ) -> f32 {
+        if matches!(block.kind, BlockKind::BlankLines) {
+            return blank_lines_exact_height(block, rope.line_count(), default_line_h);
+        }
         match self.by_index.get(block_idx).copied() {
             Some(SlotState::Exact { height, .. } | SlotState::Estimated { height, .. }) => height,
             Some(SlotState::Invalidated) => {
@@ -494,8 +497,14 @@ impl BlockHeightCache {
                     }
                     return exact_h;
                 }
-                let est =
-                    estimate_block_height(block, prose_w, base_font_px, default_line_h, word_wrap);
+                let est = estimate_block_height(
+                    block,
+                    rope.line_count(),
+                    prose_w,
+                    base_font_px,
+                    default_line_h,
+                    word_wrap,
+                );
                 if let Some(slot) = self.by_index.get_mut(block_idx) {
                     *slot = SlotState::Estimated {
                         kind_tag: key.kind_tag,
@@ -505,8 +514,14 @@ impl BlockHeightCache {
                 est
             }
             Some(SlotState::Unvisited) | None => {
-                let est =
-                    estimate_block_height(block, prose_w, base_font_px, default_line_h, word_wrap);
+                let est = estimate_block_height(
+                    block,
+                    rope.line_count(),
+                    prose_w,
+                    base_font_px,
+                    default_line_h,
+                    word_wrap,
+                );
                 if let Some(slot) = self.by_index.get_mut(block_idx) {
                     *slot = SlotState::Estimated {
                         kind_tag: block_kind_tag(block),
@@ -646,12 +661,26 @@ pub fn build_viewport_frame_cached(
         measurer,
     };
 
+    let para_gap = paragraph_gap_px(default_line_h);
+    let total_doc_lines = req.rope.line_count();
+
     for (block_idx, block) in req.blocks.iter().enumerate() {
         let contains_caret = caret_byte >= block.byte_range.start
             && caret_byte <= block.byte_range.end
             || (caret_line >= block.line_range.start && caret_line < block.line_range.end);
         let reveal_raw = req.config.view_mode == ViewMode::LivePreview && contains_caret;
-        let cacheable_formatted = !reveal_raw;
+        let is_blank_block = matches!(block.kind, BlockKind::BlankLines);
+        let cacheable_formatted = !reveal_raw && !is_blank_block;
+
+        let post_block_gap = if matches!(block.kind, BlockKind::ListItem { .. })
+            && !matches!(
+                req.blocks.get(block_idx.saturating_add(1)).map(|b| &b.kind),
+                Some(BlockKind::ListItem { .. })
+            ) {
+            (para_gap - 2.0).max(0.0)
+        } else {
+            0.0
+        };
 
         let known_or_est_h = if cacheable_formatted && let Some(cache) = height_cache.as_deref_mut()
         {
@@ -667,16 +696,18 @@ pub fn build_viewport_frame_cached(
         } else {
             estimate_block_height(
                 block,
+                total_doc_lines,
                 prose_w,
                 req.config.base_font_px,
                 default_line_h,
                 req.config.word_wrap,
             )
         };
-        let near_viewport = y_cursor + known_or_est_h >= win_top && y_cursor <= win_bot;
+        let near_viewport =
+            y_cursor + known_or_est_h + post_block_gap >= win_top && y_cursor <= win_bot;
 
         if !near_viewport && !contains_caret {
-            y_cursor += known_or_est_h;
+            y_cursor += known_or_est_h + post_block_gap;
             continue;
         }
 
@@ -687,6 +718,7 @@ pub fn build_viewport_frame_cached(
         if cacheable_formatted && let Some(cache) = height_cache.as_deref_mut() {
             cache.record_exact(block_idx, req.rope, block, measured_h);
         }
+        y_cursor += post_block_gap;
 
         // Optional Focus Mode: dim non-active blocks!
         if req.config.focus_mode && !contains_caret && measured_h > 0.0 {
@@ -695,7 +727,7 @@ pub fn build_viewport_frame_cached(
                     gutter_w,
                     block_start_y - req.scroll_y,
                     vw - gutter_w,
-                    measured_h,
+                    measured_h + post_block_gap,
                 ),
                 color: req.config.palette.canvas_bg.with_alpha(150),
                 radius: 0.0,
@@ -906,8 +938,23 @@ fn layout_list_continuation_lines(
     y
 }
 
+#[inline]
+fn paragraph_gap_px(default_line_h: f32) -> f32 {
+    (default_line_h * 0.58).round().max(11.0)
+}
+
+#[inline]
+fn blank_lines_exact_height(block: &Block, total_doc_lines: usize, line_h: f32) -> f32 {
+    let total_blank = block.line_range.len();
+    let hidden_sep = usize::from(
+        block.line_range.start > 0 && block.line_range.start.saturating_add(1) < total_doc_lines,
+    );
+    (total_blank.saturating_sub(hidden_sep) as f32) * line_h
+}
+
 fn estimate_block_height(
     block: &Block,
+    total_doc_lines: usize,
     prose_w: f32,
     base_font_px: f32,
     line_h: f32,
@@ -915,7 +962,7 @@ fn estimate_block_height(
 ) -> f32 {
     let avg_char_px = (base_font_px * 0.54).max(4.5);
     match block.kind {
-        BlockKind::BlankLines => (block.line_range.len().max(1) as f32) * (line_h * 0.75),
+        BlockKind::BlankLines => blank_lines_exact_height(block, total_doc_lines, line_h),
         BlockKind::ThematicBreak => 24.0,
         BlockKind::Heading {
             level,
@@ -943,7 +990,7 @@ fn estimate_block_height(
                 visual_lines +=
                     estimate_wrapped_visual_lines(r.len(), prose_w, avg_char_px, word_wrap);
             }
-            visual_lines.max(1.0) * line_h + 4.0
+            visual_lines.max(1.0) * line_h + paragraph_gap_px(line_h)
         }
         BlockKind::ListItem {
             indent_spaces,
@@ -1002,19 +1049,29 @@ fn layout_single_block(
 
     match block.kind {
         BlockKind::BlankLines => {
+            let total_doc_lines = ctx.rope.line_count();
+            let hide_first_sep = block.line_range.start > 0
+                && block.line_range.start.saturating_add(1) < total_doc_lines;
+            let ascent = ctx
+                .measurer
+                .font_metrics(FontRole::SansBody, base_font_px, false, false)
+                .ascent;
             for l_idx in block.line_range.clone() {
+                if hide_first_sep && l_idx == block.line_range.start && caret_line != l_idx {
+                    continue;
+                }
                 let r = ctx.rope.line_byte_range(l_idx);
                 ctx.visual_rows.push(VisualRow {
                     y_doc: y,
-                    height: default_line_h * 0.75,
-                    baseline_offset: default_line_h * 0.58,
+                    height: default_line_h,
+                    baseline_offset: ascent,
                     line_idx: l_idx,
                     doc_range: r,
                     default_x: content_x,
                     content_width: 0.0,
                     spans: Vec::new(),
                 });
-                y += default_line_h * 0.75;
+                y += default_line_h;
             }
             y
         }
@@ -1216,7 +1273,7 @@ fn layout_single_block(
                     },
                 );
             }
-            y + 4.0
+            y + paragraph_gap_px(default_line_h)
         }
         BlockKind::ListItem {
             indent_spaces,
