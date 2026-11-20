@@ -1485,6 +1485,35 @@ void MainWindow::setupMenusAndToolbars() {
     m_actHr = m_formatMenu->addAction(icon("insert-horizontal-rule"), QString());
     connect(m_actHr, &QAction::triggered, this, [this]() { dispatchCommand(KMARK_ACT_HORIZONTAL_RULE); });
 
+    m_formatMenu->addSeparator();
+
+    m_actFormatDoc = m_formatMenu->addAction(icon("format-indent-more"), QString());
+    m_actFormatDoc->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+    connect(m_actFormatDoc, &QAction::triggered, this, [this]() {
+        if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+            return;
+        }
+        const bool changed = kmark_session_format_document(m_session);
+        syncOutlineTree();
+        syncUiState();
+        m_viewport->notifyDocumentChanged();
+        m_viewport->setFocus();
+        if (changed) {
+            statusBar()->showMessage(
+                T(
+                    "Markdown document formatted (Ctrl+Z to undo).",
+                    "Markdown neu formatiert (Strg+Z macht rückgängig)."
+                ),
+                4000
+            );
+        } else {
+            statusBar()->showMessage(
+                T("Markdown is already cleanly formatted.", "Markdown ist bereits sauber formatiert."),
+                3000
+            );
+        }
+    });
+
     /* ======================== 5. TABLE / TABELLE ======================== */
     m_tableMenu = menuBar()->addMenu(QString());
     m_actInsTable = m_tableMenu->addAction(makeTableActionIcon(TableIconKind::InsertTable, palette()), QString());
@@ -1785,6 +1814,7 @@ void MainWindow::retranslateUi() {
     m_actFence->setText(T("Insert C&ode Block…", "C&odeblock einfügen…"));
     m_actFenceLang->setText(T("Code Block &Language…", "Codeblock-&Sprache festlegen…"));
     m_actHr->setText(T("Horizontal &Rule", "Horizontale &Trennlinie"));
+    m_actFormatDoc->setText(T("&Format Markdown Document", "&Markdown neu formatieren"));
 
     m_tableMenu->setTitle(T("&Table", "&Tabelle"));
     m_actInsTable->setText(T("&Insert Table…", "&Tabelle einfügen…"));
@@ -1851,6 +1881,9 @@ void MainWindow::syncUiState() {
     m_actStrike->setChecked(st.strike);
     m_actHighlight->setChecked(st.highlight);
     m_actInlineCode->setChecked(st.inline_code);
+    if (m_actFormatDoc != nullptr) {
+        m_actFormatDoc->setEnabled(st.view_mode != KMARK_VIEW_PLAIN_TEXT);
+    }
 
     const int activeHeading = std::clamp(static_cast<int>(st.heading_level), 0, 6);
     for (int lvl = 0; lvl <= 6; ++lvl) {

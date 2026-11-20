@@ -1350,6 +1350,10 @@ impl Session {
             Command::TableSetAlign(align) => {
                 Self::exec_table_op(tab, TableOp::SetAlign(align));
             }
+            Command::FormatDocument => {
+                let _ = self.format_active_document();
+                return;
+            }
             Command::SetViewMode(_)
             | Command::SetHeadingMarks(_)
             | Command::ToggleLineNumbers
@@ -1366,6 +1370,30 @@ impl Session {
         {
             self.search.recompute(&t.rope, t.selection.head);
         }
+    }
+
+    /// Formats the active Markdown document (`MD022`/`MD031`/`MD032`/`MD058`, table alignment,
+    /// ordered list numbering, trailing spaces), recording an Undo snapshot when changes occur.
+    pub fn format_active_document(&mut self) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        if matches!(tab.view_mode, ViewMode::PlainText) {
+            return false;
+        }
+        tab.armed_styles.clear();
+        let (next_rope, next_sel, changed) =
+            crate::format::format_markdown_document(&tab.rope, tab.selection);
+        if !changed {
+            return false;
+        }
+        tab.commit_edit(next_rope, next_sel, EditGroup::Discrete);
+        if !self.search.query.is_empty()
+            && let Some(t) = self.tabs.get(self.active_tab)
+        {
+            self.search.recompute(&t.rope, t.selection.head);
+        }
+        true
     }
 
     fn apply_inline_on_tab(tab: &mut DocumentTab, style: ArmedStyle) {

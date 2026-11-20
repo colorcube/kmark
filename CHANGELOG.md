@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Format Markdown Document (`Format -> Format Markdown Document` / `Markdown neu formatieren`, `Ctrl+Shift+F`, `kmark-cli format`)**:
+  - Losslessly normalizes blank lines around headings (`MD022`), lists (`MD032`), fenced code blocks (`MD031`), blockquotes, and tables (`MD058`), aligns GFM table columns, renumbers ordered lists, collapses duplicate blank lines (`MD012`), and strips accidental trailing spaces while keeping YAML frontmatter and code-fence contents untouched (fully undoable with `Ctrl+Z`).
+  - Applying `H1`–`H6` (`Ctrl+1`–`Ctrl+6` / toolbar buttons) now automatically ensures a blank line before (unless on line 1) and after the heading.
+
 ### Changed
 - **Paragraph & Heading Toolbar Icon Buttons**: Replaced the toolbar heading dropdown with 7 checkable, HiDPI vector icon buttons (`¶`, `H1`–`H6`) highlighting the active block level (`Ctrl+0`–`Ctrl+6`).
 - **Typographic Paragraph Spacing & WYSIWYG `Enter` / `Shift+Enter`**: Paragraphs and list boundaries now render with clear vertical paragraph spacing (`~0.58×` line height) without a dead blank cursor row between paragraphs; in Formatted (`WYSIWYG`) mode, `Enter` starts a new paragraph (`\n\n`) while `Shift+Enter` inserts a soft-spaced line break (`  \n`) inside the same paragraph.

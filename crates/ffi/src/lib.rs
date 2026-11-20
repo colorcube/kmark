@@ -1250,6 +1250,7 @@ pub extern "C" fn kmark_session_exec_command(session: *mut KMarkSession, cmd_id:
             36 => Some(Command::TableSetAlign(ColumnAlign::Left)),
             37 => Some(Command::TableSetAlign(ColumnAlign::Center)),
             38 => Some(Command::TableSetAlign(ColumnAlign::Right)),
+            39 => Some(Command::FormatDocument),
             40 => Some(Command::SetViewMode(ViewMode::Wysiwyg)),
             41 => Some(Command::SetViewMode(ViewMode::LivePreview)),
             42 => Some(Command::SetViewMode(ViewMode::Source)),
@@ -1270,6 +1271,11 @@ pub extern "C" fn kmark_session_exec_command(session: *mut KMarkSession, cmd_id:
             s.session.execute_command(cmd);
         }
     });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_format_document(session: *mut KMarkSession) -> bool {
+    with_session_mut(session, false, |s| s.session.format_active_document())
 }
 
 #[unsafe(no_mangle)]

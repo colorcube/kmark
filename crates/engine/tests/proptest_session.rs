@@ -173,6 +173,7 @@ fn proptest_session_commands_and_undo_redo_roundtrip_across_200_sequences() {
                         session.execute_command(Command::Redo);
                     }
                 }
+                26 => session.execute_command(Command::FormatDocument),
                 _ => {
                     let key = match rng.gen_range(10) {
                         0 => KeyCode::Enter,

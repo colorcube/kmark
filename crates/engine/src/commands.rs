@@ -86,6 +86,7 @@ pub enum Command {
     TableInsertColRight,
     TableDeleteCol,
     TableSetAlign(ColumnAlign),
+    FormatDocument,
     SetViewMode(ViewMode),
     SetHeadingMarks(HeadingMarkStyle),
     ToggleLineNumbers,
@@ -295,6 +296,13 @@ pub const COMMAND_CATALOG: &[CommandDescriptor] = &[
         shortcut: "",
         icon_theme: "edit-table-delete-column",
         category_de: "Tabelle",
+    },
+    CommandDescriptor {
+        id: "format.document",
+        label_de: "Markdown neu formatieren",
+        shortcut: "Ctrl+Shift+F",
+        icon_theme: "format-indent-more",
+        category_de: "Format",
     },
     CommandDescriptor {
         id: "view.mode.wysiwyg",
@@ -1019,7 +1027,7 @@ fn find_col_in_row(row: &TableRow, caret: usize) -> usize {
 }
 
 #[derive(Clone, Debug)]
-struct EditableTable {
+pub(crate) struct EditableTable {
     cols: usize,
     alignments: Vec<ColumnAlign>,
     /// Row 0 is header, rows `1..` are body rows.
@@ -1027,7 +1035,7 @@ struct EditableTable {
 }
 
 impl EditableTable {
-    fn from_ast(rope: &Rope, table: &TableBlock) -> Self {
+    pub(crate) fn from_ast(rope: &Rope, table: &TableBlock) -> Self {
         let cols = table.col_count.max(1);
         let mut alignments = table.alignments.clone();
         alignments.resize(cols, ColumnAlign::Left);
@@ -1044,7 +1052,7 @@ impl EditableTable {
         }
     }
 
-    fn format_markdown(&self) -> String {
+    pub(crate) fn format_markdown(&self) -> String {
         let mut col_widths = vec![3usize; self.cols];
         for row in &self.rows {
             for (c, val) in row.iter().enumerate() {

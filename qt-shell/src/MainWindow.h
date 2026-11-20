@@ -233,6 +233,7 @@ private:
     QAction* m_actFence = nullptr;
     QAction* m_actFenceLang = nullptr;
     QAction* m_actHr = nullptr;
+    QAction* m_actFormatDoc = nullptr;
 
     QAction* m_actInsTable = nullptr;
     QAction* m_actRowAbove = nullptr;

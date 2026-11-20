@@ -158,6 +158,7 @@ enum KMarkCommandId {
     KMARK_ACT_TABLE_ALIGN_LEFT      = 36,
     KMARK_ACT_TABLE_ALIGN_CENTER    = 37,
     KMARK_ACT_TABLE_ALIGN_RIGHT     = 38,
+    KMARK_ACT_FORMAT_DOCUMENT       = 39,
     KMARK_ACT_VIEW_WYSIWYG          = 40,
     KMARK_ACT_VIEW_LIVE_PREVIEW     = 41,
     KMARK_ACT_VIEW_SOURCE           = 42,
@@ -404,6 +405,7 @@ void kmark_string_free(char* s);
 
 /* Commands, typing, IME, keyboard, mouse, drag-drop & scrolling */
 void kmark_session_exec_command(KMarkSession* session, uint32_t cmd_id);
+bool kmark_session_format_document(KMarkSession* session);
 void kmark_session_insert_code_fence(KMarkSession* session, const char* language_utf8);
 void kmark_session_set_code_fence_language(
     KMarkSession* session,

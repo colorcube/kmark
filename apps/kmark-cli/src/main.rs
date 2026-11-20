@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use kmark_buffer::encoding::{read_file_auto, write_file_atomic};
-use kmark_buffer::{LineEnding, Rope, TextEncoding};
-use kmark_engine::{COMMAND_CATALOG, Session};
+use kmark_buffer::{LineEnding, Rope, Selection, TextEncoding};
+use kmark_engine::{COMMAND_CATALOG, Session, format_markdown_document};
 use kmark_layout::FallbackMeasurer;
 use kmark_syntax::{BlockKind, export_html_document, extract_outline, parse_blocks};
 
@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         "info" => cmd_info(args.get(1).map(String::as_str)),
         "outline" => cmd_outline(args.get(1).map(String::as_str)),
         "html" => cmd_html(&args[1..]),
+        "format" => cmd_format(&args[1..]),
         "commands" => {
             cmd_commands();
             Ok(())
@@ -53,6 +54,7 @@ Verwendung:
   kmark-cli info <datei>               Dokument-Statistik, Kodierung & Blockstruktur
   kmark-cli outline <datei>            Überschriften-Gliederung (H1–H6) ausgeben
   kmark-cli html <datei> [-o out.html] Eigenständiges HTML5-Dokument exportieren
+  kmark-cli format <datei> [-o out.md] Markdown-Dokument normgerecht neu formatieren
   kmark-cli commands                   Alle registrierten Editor-Befehle & KDE-Shortcuts
   kmark-cli bench                      Latenz-Benchmark über 6.000 bis 100.000 Zeilen"
     );
@@ -154,6 +156,41 @@ fn cmd_html(args: &[String]) -> Result<(), String> {
         );
     } else {
         print!("{html}");
+    }
+    Ok(())
+}
+
+fn cmd_format(args: &[String]) -> Result<(), String> {
+    let Some(input_path) = args.first() else {
+        return Err("Bitte Eingabedatei angeben: kmark-cli format <datei> [-o out.md]".to_owned());
+    };
+    let mut out_path: Option<&str> = None;
+    let mut i = 1usize;
+    while i < args.len() {
+        if args.get(i).map(String::as_str) == Some("-o") {
+            out_path = args.get(i.saturating_add(1)).map(String::as_str);
+            i = i.saturating_add(2);
+        } else {
+            i = i.saturating_add(1);
+        }
+    }
+
+    let path = Path::new(input_path);
+    let decoded = read_file_auto(path).map_err(|e| e.to_string())?;
+    let rope = Rope::from_str(&decoded.text);
+    let (formatted, _, changed) = format_markdown_document(&rope, Selection::collapsed(0));
+    let dest = out_path.map_or(path, Path::new);
+
+    if changed || out_path.is_some() {
+        let out_text = formatted.to_string_lossless();
+        write_file_atomic(dest, &out_text, decoded.encoding, decoded.line_ending)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if changed {
+        println!("Markdown neu formatiert: {}", dest.display());
+    } else {
+        println!("Bereits sauber formatiert: {}", dest.display());
     }
     Ok(())
 }

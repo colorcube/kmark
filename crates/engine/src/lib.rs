@@ -2,6 +2,7 @@
 //! formatting, smart structural editing, 2D table manipulation, find/replace, and crash recovery.
 
 pub mod commands;
+pub mod format;
 pub mod input;
 pub mod recovery;
 pub mod reference;
@@ -10,6 +11,7 @@ pub mod search;
 pub mod session;
 
 pub use commands::{ArmedStyle, COMMAND_CATALOG, Command, CommandDescriptor};
+pub use format::format_markdown_document;
 pub use input::{KeyCode, KeyModifiers};
 pub use kmark_syntax::ImageSize;
 pub use recovery::{RecoveryDraft, RecoveryStore};
@@ -780,6 +782,93 @@ mod tests {
         assert_eq!(
             session.active_doc().unwrap().rope.to_string_lossless(),
             "# Titel oben\n\nAbsatz mitte\n\n### Unterabschnitt\n\nAbsatz unten"
+        );
+    }
+
+    #[test]
+    fn format_markdown_document_normalizes_headings_lists_tables_frontmatter_and_preserves_code_fences()
+     {
+        let messy = "\
+---
+title: Notiz
+tags: [kde, markdown]
+---
+#   Haupttitel   
+Absatz vorher   
+-   Erster Punkt
+    Folgezeile   
+- [X]  Erledigt
+Absatz danach
+
+
+1. Eins
+1. Zwei
+9. Drei
+##   Tabelle & Code
+|Name|Wert|
+|:---|---:|
+|KMark|42|
+```rust
+fn demo() {
+    let keep_trailing = 1;   
+}
+```
+>   [!note]  Wichtiger Hinweis  
+>Text im Callout   
+
+
+";
+        let mut session = Session::new_headless();
+        session.insert_text(messy);
+
+        assert!(session.format_active_document());
+        let formatted = session.active_doc().unwrap().rope.to_string_lossless();
+
+        let expected = "\
+---
+title: Notiz
+tags: [kde, markdown]
+---
+
+# Haupttitel
+
+Absatz vorher
+
+- Erster Punkt
+  Folgezeile
+- [x] Erledigt
+
+Absatz danach
+
+1. Eins
+2. Zwei
+3. Drei
+
+## Tabelle & Code
+
+| Name  | Wert |
+| ----- | ---: |
+| KMark | 42   |
+
+```rust
+fn demo() {
+    let keep_trailing = 1;   
+}
+```
+
+> [!NOTE] Wichtiger Hinweis
+> Text im Callout
+";
+        assert_eq!(formatted, expected);
+
+        // Idempotence: formatting an already-clean document reports `false` (no-op)
+        assert!(!session.format_active_document());
+
+        // Undo restores the exact original unformatted text in a single step!
+        session.execute_command(Command::Undo);
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            messy
         );
     }
 }
