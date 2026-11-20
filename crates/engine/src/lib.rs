@@ -24,7 +24,7 @@ pub use session::{
 #[cfg(test)]
 mod tests {
     use kmark_layout::ViewMode;
-    use kmark_syntax::ColumnAlign;
+    use kmark_syntax::{BlockKind, ColumnAlign};
 
     use super::*;
 
@@ -51,6 +51,8 @@ mod tests {
 
     #[test]
     fn smart_list_continuation_and_exit_on_empty_item() {
+        // 1. Exiting a top-level list with 2x Enter inserts a separating blank line (#316)
+        //    so subsequent text starts an unindented Paragraph instead of a lazy continuation line.
         let mut session = Session::new_headless();
         session.insert_text("1. Erster Punkt");
         session.handle_key(KeyCode::Enter, KeyModifiers::default());
@@ -59,12 +61,56 @@ mod tests {
             "1. Erster Punkt\n2. "
         );
 
-        // Pressing Enter again on empty `2. ` exits the list cleanly!
         session.handle_key(KeyCode::Enter, KeyModifiers::default());
         assert_eq!(
             session.active_doc().unwrap().rope.to_string_lossless(),
-            "1. Erster Punkt\n"
+            "1. Erster Punkt\n\n"
         );
+
+        session.insert_text("Neuer Absatz ohne Einrückung");
+        let doc = session.active_doc().unwrap();
+        assert_eq!(
+            doc.rope.to_string_lossless(),
+            "1. Erster Punkt\n\nNeuer Absatz ohne Einrückung"
+        );
+        assert!(matches!(
+            doc.blocks.first().map(|b| &b.kind),
+            Some(BlockKind::ListItem { continuation_lines, .. }) if continuation_lines.is_empty()
+        ));
+        assert!(matches!(
+            doc.blocks.last().map(|b| &b.kind),
+            Some(BlockKind::Paragraph { .. })
+        ));
+
+        // 2. Nested sublists: Enter on empty sub-item outdents one level first; a second Enter exits.
+        let mut nested = Session::new_headless();
+        nested.insert_text("1. Hauptpunkt\n  - Unterpunkt");
+        nested.handle_key(KeyCode::Enter, KeyModifiers::default());
+        assert_eq!(
+            nested.active_doc().unwrap().rope.to_string_lossless(),
+            "1. Hauptpunkt\n  - Unterpunkt\n  - "
+        );
+        nested.handle_key(KeyCode::Enter, KeyModifiers::default());
+        assert_eq!(
+            nested.active_doc().unwrap().rope.to_string_lossless(),
+            "1. Hauptpunkt\n  - Unterpunkt\n2. "
+        );
+        nested.handle_key(KeyCode::Enter, KeyModifiers::default());
+        nested.insert_text("Absatz danach");
+        assert_eq!(
+            nested.active_doc().unwrap().rope.to_string_lossless(),
+            "1. Hauptpunkt\n  - Unterpunkt\n\nAbsatz danach"
+        );
+        assert!(matches!(
+            nested.active_doc().unwrap().blocks.last().map(|b| &b.kind),
+            Some(BlockKind::Paragraph { .. })
+        ));
+
+        // 3. Standalone empty list item with no preceding list item strips in-place without extra blank line.
+        let mut single = Session::new_headless();
+        single.insert_text("- ");
+        single.handle_key(KeyCode::Enter, KeyModifiers::default());
+        assert_eq!(single.active_doc().unwrap().rope.to_string_lossless(), "");
     }
 
     #[test]

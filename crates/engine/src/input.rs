@@ -139,15 +139,48 @@ pub fn handle_enter(
             let line_range = rope.line_byte_range(lc.line);
             let line = rope.slice_to_string(line_range.clone());
 
-            if let Some((prefix_len, next_prefix, is_empty_item)) = analyze_continuation_line(&line)
-            {
-                if is_empty_item {
-                    // Pressing Enter on an empty `- ` / `1. ` / `> ` exits the list/quote cleanly!
+            if let Some(info) = analyze_continuation_line(&line) {
+                if info.is_empty_item {
                     let mut next = rope.clone();
-                    next.replace_range(
-                        line_range.start..line_range.start.saturating_add(prefix_len),
-                        "",
-                    );
+                    if info.is_list {
+                        if info.indent_bytes > 0 {
+                            // Outdent empty nested list item by one level first.
+                            let outdented = find_parent_list_next_prefix(
+                                rope,
+                                blocks,
+                                lc.line,
+                                info.indent_bytes,
+                            )
+                            .unwrap_or_else(|| {
+                                let drop_spaces = info.indent_bytes.min(2);
+                                line.get(drop_spaces..info.prefix_len)
+                                    .unwrap_or("")
+                                    .to_string()
+                            });
+                            next.replace_range(line_range.clone(), &outdented);
+                            return (
+                                next,
+                                Selection::collapsed(
+                                    line_range.start.saturating_add(outdented.len()),
+                                ),
+                                EditGroup::Discrete,
+                            );
+                        }
+
+                        if preceded_by_list_item(blocks, lc.line) {
+                            // Separate the exited list from the new paragraph with a blank line so
+                            // CommonMark does not capture subsequent text as a lazy continuation line.
+                            next.replace_range(line_range.clone(), "\n");
+                            return (
+                                next,
+                                Selection::collapsed(line_range.start.saturating_add(1)),
+                                EditGroup::Discrete,
+                            );
+                        }
+                    }
+
+                    // Empty standalone list item or empty blockquote line: strip prefix in-place.
+                    next.replace_range(line_range.clone(), "");
                     return (
                         next,
                         Selection::collapsed(line_range.start),
@@ -156,8 +189,8 @@ pub fn handle_enter(
                 }
 
                 // Only continue if caret is at or after the marker prefix
-                if selection.head >= line_range.start.saturating_add(prefix_len) {
-                    let inserted = format!("\n{next_prefix}");
+                if selection.head >= line_range.start.saturating_add(info.prefix_len) {
+                    let inserted = format!("\n{}", info.next_prefix);
                     let mut next = rope.clone();
                     next.replace_range(selection.head..selection.head, &inserted);
                     return (
@@ -203,8 +236,53 @@ fn is_in_code_fence(blocks: &[Block], byte_offset: usize) -> bool {
     })
 }
 
-/// Returns `(current_prefix_byte_len, next_line_prefix, is_item_body_empty)`.
-fn analyze_continuation_line(line: &str) -> Option<(usize, String, bool)> {
+fn preceded_by_list_item(blocks: &[Block], line_idx: usize) -> bool {
+    line_idx > 0
+        && blocks
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::ListItem { .. }) && b.line_range.end == line_idx)
+}
+
+fn find_parent_list_next_prefix(
+    rope: &Rope,
+    blocks: &[Block],
+    line_idx: usize,
+    current_indent: usize,
+) -> Option<String> {
+    let mut expected_end = line_idx;
+    for blk in blocks.iter().rev() {
+        if blk.line_range.end > expected_end {
+            continue;
+        }
+        if blk.line_range.end < expected_end {
+            break;
+        }
+        let BlockKind::ListItem {
+            indent_spaces,
+            line_idx: item_line,
+            ..
+        } = blk.kind
+        else {
+            break;
+        };
+        if indent_spaces < current_indent {
+            let parent_line = rope.slice_to_string(rope.line_byte_range(item_line));
+            return analyze_continuation_line(&parent_line).map(|c| c.next_prefix);
+        }
+        expected_end = blk.line_range.start;
+    }
+    None
+}
+
+struct ContinuationInfo {
+    is_list: bool,
+    indent_bytes: usize,
+    prefix_len: usize,
+    next_prefix: String,
+    is_empty_item: bool,
+}
+
+fn analyze_continuation_line(line: &str) -> Option<ContinuationInfo> {
     let indent_bytes = line.bytes().take_while(|b| *b == b' ').count();
     let indent = line.get(..indent_bytes)?;
     let rest = line.get(indent_bytes..)?;
@@ -215,7 +293,13 @@ fn analyze_continuation_line(line: &str) -> Option<(usize, String, bool)> {
             let bullet = marker.get(..1).unwrap_or("-");
             let cur_len = indent_bytes.saturating_add(marker.len());
             let next_pfx = format!("{indent}{bullet} [ ] ");
-            return Some((cur_len, next_pfx, body.trim().is_empty()));
+            return Some(ContinuationInfo {
+                is_list: true,
+                indent_bytes,
+                prefix_len: cur_len,
+                next_prefix: next_pfx,
+                is_empty_item: body.trim().is_empty(),
+            });
         }
     }
 
@@ -224,7 +308,13 @@ fn analyze_continuation_line(line: &str) -> Option<(usize, String, bool)> {
         if let Some(body) = rest.strip_prefix(marker) {
             let cur_len = indent_bytes.saturating_add(marker.len());
             let next_pfx = format!("{indent}{marker}");
-            return Some((cur_len, next_pfx, body.trim().is_empty()));
+            return Some(ContinuationInfo {
+                is_list: true,
+                indent_bytes,
+                prefix_len: cur_len,
+                next_prefix: next_pfx,
+                is_empty_item: body.trim().is_empty(),
+            });
         }
     }
 
@@ -242,7 +332,13 @@ fn analyze_continuation_line(line: &str) -> Option<(usize, String, bool)> {
                     .saturating_add(digits)
                     .saturating_add(sep.len());
                 let next_pfx = format!("{indent}{}{sep}", num.saturating_add(1));
-                return Some((cur_len, next_pfx, body.trim().is_empty()));
+                return Some(ContinuationInfo {
+                    is_list: true,
+                    indent_bytes,
+                    prefix_len: cur_len,
+                    next_prefix: next_pfx,
+                    is_empty_item: body.trim().is_empty(),
+                });
             }
         }
     }
@@ -257,11 +353,13 @@ fn analyze_continuation_line(line: &str) -> Option<(usize, String, bool)> {
         let marker = rest.get(..q_bytes)?;
         let body = rest.get(q_bytes..)?;
         if !body.starts_with("[!") {
-            return Some((
-                indent_bytes.saturating_add(q_bytes),
-                format!("{indent}{marker}"),
-                body.trim().is_empty(),
-            ));
+            return Some(ContinuationInfo {
+                is_list: false,
+                indent_bytes,
+                prefix_len: indent_bytes.saturating_add(q_bytes),
+                next_prefix: format!("{indent}{marker}"),
+                is_empty_item: body.trim().is_empty(),
+            });
         }
     }
 
