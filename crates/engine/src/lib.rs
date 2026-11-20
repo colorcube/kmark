@@ -51,36 +51,35 @@ mod tests {
 
     #[test]
     fn smart_list_continuation_and_exit_on_empty_item() {
-        // 1. Exiting a top-level list with 2x Enter inserts a separating blank line (#316)
-        //    so subsequent text starts an unindented Paragraph instead of a lazy continuation line.
+        // 1. Exiting a top-level list with 2x Enter starts a clean column-0 Paragraph (#316)
+        //    without needing an artificial blank line (`Absatz vorher\n- Aufzählung\nAbsatz danach`).
         let mut session = Session::new_headless();
-        session.insert_text("1. Erster Punkt");
+        session.insert_text("Absatz vorher\n1. Erster Punkt");
         session.handle_key(KeyCode::Enter, KeyModifiers::default());
         assert_eq!(
             session.active_doc().unwrap().rope.to_string_lossless(),
-            "1. Erster Punkt\n2. "
+            "Absatz vorher\n1. Erster Punkt\n2. "
         );
 
         session.handle_key(KeyCode::Enter, KeyModifiers::default());
         assert_eq!(
             session.active_doc().unwrap().rope.to_string_lossless(),
-            "1. Erster Punkt\n\n"
+            "Absatz vorher\n1. Erster Punkt\n"
         );
 
-        session.insert_text("Neuer Absatz ohne Einrückung");
+        session.insert_text("Absatz danach");
         let doc = session.active_doc().unwrap();
         assert_eq!(
             doc.rope.to_string_lossless(),
-            "1. Erster Punkt\n\nNeuer Absatz ohne Einrückung"
+            "Absatz vorher\n1. Erster Punkt\nAbsatz danach"
         );
+        assert_eq!(doc.blocks.len(), 3, "{:#?}", doc.blocks);
+        assert!(matches!(doc.blocks[0].kind, BlockKind::Paragraph { .. }));
         assert!(matches!(
-            doc.blocks.first().map(|b| &b.kind),
-            Some(BlockKind::ListItem { continuation_lines, .. }) if continuation_lines.is_empty()
+            doc.blocks[1].kind,
+            BlockKind::ListItem { ref continuation_lines, .. } if continuation_lines.is_empty()
         ));
-        assert!(matches!(
-            doc.blocks.last().map(|b| &b.kind),
-            Some(BlockKind::Paragraph { .. })
-        ));
+        assert!(matches!(doc.blocks[2].kind, BlockKind::Paragraph { .. }));
 
         // 2. Nested sublists: Enter on empty sub-item outdents one level first; a second Enter exits.
         let mut nested = Session::new_headless();
@@ -99,18 +98,34 @@ mod tests {
         nested.insert_text("Absatz danach");
         assert_eq!(
             nested.active_doc().unwrap().rope.to_string_lossless(),
-            "1. Hauptpunkt\n  - Unterpunkt\n\nAbsatz danach"
+            "1. Hauptpunkt\n  - Unterpunkt\nAbsatz danach"
         );
         assert!(matches!(
             nested.active_doc().unwrap().blocks.last().map(|b| &b.kind),
             Some(BlockKind::Paragraph { .. })
         ));
 
-        // 3. Standalone empty list item with no preceding list item strips in-place without extra blank line.
-        let mut single = Session::new_headless();
-        single.insert_text("- ");
-        single.handle_key(KeyCode::Enter, KeyModifiers::default());
-        assert_eq!(single.active_doc().unwrap().rope.to_string_lossless(), "");
+        // 3. Shift+Enter inside a list item inserts an indented continuation line inside that item.
+        let mut cont = Session::new_headless();
+        cont.insert_text("- Punkt eins");
+        cont.handle_key(
+            KeyCode::Enter,
+            KeyModifiers {
+                shift: true,
+                ..KeyModifiers::default()
+            },
+        );
+        cont.insert_text("Zeile im selben Punkt");
+        let cont_doc = cont.active_doc().unwrap();
+        assert_eq!(
+            cont_doc.rope.to_string_lossless(),
+            "- Punkt eins  \n  Zeile im selben Punkt"
+        );
+        assert_eq!(cont_doc.blocks.len(), 1);
+        assert!(matches!(
+            cont_doc.blocks[0].kind,
+            BlockKind::ListItem { ref continuation_lines, .. } if continuation_lines.len() == 1
+        ));
     }
 
     #[test]

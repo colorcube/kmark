@@ -121,17 +121,17 @@ mod tests {
     }
 
     #[test]
-    fn list_item_keeps_indented_and_lazy_continuation_lines() {
-        // Regression #293: continuation lines used to become separate paragraphs.
+    fn list_item_keeps_indented_continuation_and_breaks_on_column_zero() {
+        // Regression #293 + #316: indented lines continue the list item, whereas unindented
+        // column-0 text after a list item starts a separate paragraph even without a blank line.
         let md = "\
+Absatz vorher
 -   **Neue Quellen (`x`):**  
     Starten beim nächsten Tick.
 - Zweiter Punkt
-faule Folgezeile
   - Unterpunkt
     weiter im Unterpunkt
-
-Danach ein Absatz.
+Absatz danach
 ";
         let rope = Rope::from_str(md);
         let blocks = parse_blocks(&rope);
@@ -154,31 +154,32 @@ Danach ein Absatz.
             })
             .collect();
         assert_eq!(conts[0], vec!["Starten beim nächsten Tick."]);
-        assert_eq!(conts[1], vec!["faule Folgezeile"]);
+        assert!(conts[1].is_empty());
         assert_eq!(conts[2], vec!["weiter im Unterpunkt"]);
-        assert_eq!(items[0].line_range, 0..2);
+        assert_eq!(items[0].line_range, 1..3);
         assert_eq!(items[2].line_range, 4..6);
 
-        // The trailing paragraph after the blank line stays a separate block.
-        assert!(matches!(
-            blocks.last().map(|b| &b.kind),
-            Some(BlockKind::BlankLines | BlockKind::Paragraph { .. })
-        ));
-        assert!(
-            blocks
-                .iter()
-                .any(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
-        );
+        let paragraphs: Vec<String> = blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::Paragraph { lines } => Some(
+                    lines
+                        .iter()
+                        .map(|(_, r)| rope.slice_to_string(r.clone()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paragraphs, vec!["Absatz vorher", "Absatz danach"]);
 
         let html = export_html_document("t", &rope, &blocks);
         assert!(
             html.contains("<br>\nStarten beim nächsten Tick.</li>"),
             "{html}"
         );
-        assert!(
-            html.contains("<li>Zweiter Punkt\nfaule Folgezeile</li>"),
-            "{html}"
-        );
+        assert!(html.contains("</ul>\n<p>Absatz danach</p>"), "{html}");
     }
 
     #[test]

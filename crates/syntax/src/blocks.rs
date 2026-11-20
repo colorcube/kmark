@@ -380,7 +380,10 @@ fn parse_window_lines(lines: &[(Range<usize>, String)]) -> Vec<Block> {
             let mut continuation = Vec::new();
             while i < total_lines && !interrupts_paragraph(lines, i) {
                 let (ref r, ref t) = lines[i];
-                let indent_bytes = t.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+                let (indent_cols, indent_bytes) = leading_indent_cols_and_bytes(t);
+                if indent_cols < 2 {
+                    break;
+                }
                 continuation.push((i, r.start.saturating_add(indent_bytes)..r.end));
                 end_b = r.end;
                 i = i.saturating_add(1);
@@ -470,6 +473,25 @@ pub fn is_blank(line: &str) -> bool {
 
 fn leading_spaces(line: &str) -> usize {
     line.bytes().take_while(|&b| b == b' ').count()
+}
+
+fn leading_indent_cols_and_bytes(line: &str) -> (usize, usize) {
+    let mut cols = 0usize;
+    let mut bytes = 0usize;
+    for b in line.bytes() {
+        match b {
+            b' ' => {
+                cols = cols.saturating_add(1);
+                bytes = bytes.saturating_add(1);
+            }
+            b'\t' => {
+                cols = cols.saturating_add(4);
+                bytes = bytes.saturating_add(1);
+            }
+            _ => break,
+        }
+    }
+    (cols, bytes)
 }
 
 fn parse_fence_open(line: &str) -> Option<(u8, usize, String)> {

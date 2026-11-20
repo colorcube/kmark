@@ -103,9 +103,10 @@ mod tests {
 
     #[test]
     fn list_continuation_lines_align_under_item_text() {
-        // Regression #293: indented continuation lines were a separate paragraph drawn with
-        // visible indentation at the paragraph margin.
-        let md = "-   **Fett:**  \n    Folgezeile im Punkt.\n\nAbsatz.\n";
+        // Regression #293 + #316: indented continuation lines align under item text, whereas
+        // unindented column-0 text directly after a list renders at the paragraph margin without
+        // requiring a blank line.
+        let md = "Vorher\n-   **Fett:**  \n    Folgezeile im Punkt.\nDanach\n";
         let rope = Rope::from_str(md);
         let blocks = parse_blocks(&rope);
         let mut measurer = FallbackMeasurer;
@@ -139,12 +140,14 @@ mod tests {
             })
         };
         let cont_pos = md.find("Folgezeile").unwrap();
-        let frame = render(md.find("Absatz").unwrap(), &mut measurer);
+        let frame = render(md.find("Danach").unwrap(), &mut measurer);
+        let before_x = text_x(&frame, "Vorher").unwrap();
         let fett_x = text_x(&frame, "Fett").unwrap();
         let cont_x = text_x(&frame, "Folgezeile").unwrap();
-        let para_x = text_x(&frame, "Absatz").unwrap();
+        let after_x = text_x(&frame, "Danach").unwrap();
         assert!((fett_x - cont_x).abs() < 0.5, "{fett_x} vs {cont_x}");
-        assert!(cont_x > para_x + 10.0);
+        assert!(cont_x > before_x + 10.0);
+        assert!((before_x - after_x).abs() < 0.5, "{before_x} vs {after_x}");
 
         // Caret in the hidden indentation sits at the start of the visible continuation text.
         let at_text = render(cont_pos, &mut measurer).caret_doc_rect;

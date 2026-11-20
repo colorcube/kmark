@@ -133,7 +133,22 @@ pub fn handle_enter(
             }
         }
 
-        // 2. Smart list & blockquote continuation on collapsed selection
+        // 2. Shift+Enter inside a list item inserts a hard break + indented continuation line
+        if selection.is_empty()
+            && modifiers.shift
+            && let Some(cont_indent) = list_item_continuation_indent(rope, blocks, selection.head)
+        {
+            let inserted = format!("  \n{}", " ".repeat(cont_indent));
+            let mut next = rope.clone();
+            next.replace_range(selection.head..selection.head, &inserted);
+            return (
+                next,
+                Selection::collapsed(selection.head.saturating_add(inserted.len())),
+                EditGroup::Discrete,
+            );
+        }
+
+        // 3. Smart list & blockquote continuation on collapsed selection
         if selection.is_empty() && !modifiers.shift {
             let lc = rope.byte_to_line_col(selection.head);
             let line_range = rope.line_byte_range(lc.line);
@@ -142,44 +157,26 @@ pub fn handle_enter(
             if let Some(info) = analyze_continuation_line(&line) {
                 if info.is_empty_item {
                     let mut next = rope.clone();
-                    if info.is_list {
-                        if info.indent_bytes > 0 {
-                            // Outdent empty nested list item by one level first.
-                            let outdented = find_parent_list_next_prefix(
-                                rope,
-                                blocks,
-                                lc.line,
-                                info.indent_bytes,
-                            )
-                            .unwrap_or_else(|| {
-                                let drop_spaces = info.indent_bytes.min(2);
-                                line.get(drop_spaces..info.prefix_len)
-                                    .unwrap_or("")
-                                    .to_string()
-                            });
-                            next.replace_range(line_range.clone(), &outdented);
-                            return (
-                                next,
-                                Selection::collapsed(
-                                    line_range.start.saturating_add(outdented.len()),
-                                ),
-                                EditGroup::Discrete,
-                            );
-                        }
-
-                        if preceded_by_list_item(blocks, lc.line) {
-                            // Separate the exited list from the new paragraph with a blank line so
-                            // CommonMark does not capture subsequent text as a lazy continuation line.
-                            next.replace_range(line_range.clone(), "\n");
-                            return (
-                                next,
-                                Selection::collapsed(line_range.start.saturating_add(1)),
-                                EditGroup::Discrete,
-                            );
-                        }
+                    if info.is_list && info.indent_bytes > 0 {
+                        // Outdent empty nested list item by one level first.
+                        let outdented =
+                            find_parent_list_next_prefix(rope, blocks, lc.line, info.indent_bytes)
+                                .unwrap_or_else(|| {
+                                    let drop_spaces = info.indent_bytes.min(2);
+                                    line.get(drop_spaces..info.prefix_len)
+                                        .unwrap_or("")
+                                        .to_string()
+                                });
+                        next.replace_range(line_range.clone(), &outdented);
+                        return (
+                            next,
+                            Selection::collapsed(line_range.start.saturating_add(outdented.len())),
+                            EditGroup::Discrete,
+                        );
                     }
 
-                    // Empty standalone list item or empty blockquote line: strip prefix in-place.
+                    // Exit top-level list item or blockquote line cleanly at column 0;
+                    // column-0 text after a list starts a new Paragraph directly (#316).
                     next.replace_range(line_range.clone(), "");
                     return (
                         next,
@@ -236,11 +233,35 @@ fn is_in_code_fence(blocks: &[Block], byte_offset: usize) -> bool {
     })
 }
 
-fn preceded_by_list_item(blocks: &[Block], line_idx: usize) -> bool {
-    line_idx > 0
-        && blocks
-            .iter()
-            .any(|b| matches!(b.kind, BlockKind::ListItem { .. }) && b.line_range.end == line_idx)
+fn list_item_continuation_indent(
+    rope: &Rope,
+    blocks: &[Block],
+    byte_offset: usize,
+) -> Option<usize> {
+    let lc = rope.byte_to_line_col(byte_offset);
+    for blk in blocks {
+        if !blk.line_range.contains(&lc.line) {
+            continue;
+        }
+        if let BlockKind::ListItem {
+            line_idx,
+            ref content_range,
+            ..
+        } = blk.kind
+        {
+            if lc.line == line_idx {
+                let first_range = rope.line_byte_range(line_idx);
+                if byte_offset >= content_range.start {
+                    return Some(content_range.start.saturating_sub(first_range.start).max(2));
+                }
+                return None;
+            }
+            let cont_line = rope.slice_to_string(rope.line_byte_range(lc.line));
+            let spaces = cont_line.bytes().take_while(|&b| b == b' ').count();
+            return Some(spaces.max(2));
+        }
+    }
+    None
 }
 
 fn find_parent_list_next_prefix(
