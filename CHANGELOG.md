@@ -5,6 +5,16 @@ All notable changes to **KMark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-21
+
+### Added
+- **Automatic Bare URL & Autolink Recognition (`#323`)**:
+  - Recognizes bare URLs (`https://…`, `http://…`, `ftp://…`, `file:///…`, `mailto:…`, `www.…` -> `https://www.…`) and angle-bracket autolinks (`<https://…>`, `<user@domain.tld>`) with balanced-bracket and sentence-punctuation handling across **all** view modes (`Formatted`, `Live Preview`, `Source`, and `TXT`), fenced code blocks, and HTML5 export.
+  - Opens links via `Ctrl+Click` (keeping `Shift+Click` for text selection) and jumps directly to in-document `#anchor` headings, with immediate `Ctrl` hand-cursor feedback, hover tooltips, and *Open Link* / *Copy Link Address* actions in the right-click context menu.
+- **Foreign Table Recognition & Conversion (`#324`)**:
+  - Converts Unicode console box-drawing tables (`┌─┬─┐`, `│ … │`, `├─┼─┤`, `└─┴─┘`, including multi-line wrapped cells and blank lines), ASCII `+---+---+` / `psql` grids, RFC-4180 CSV / semicolon-CSV / TSV, and clipboard HTML `<table>` markup into clean GFM Markdown tables.
+  - Added explicit actions `Table -> Convert to Markdown Table` (`Ctrl+Alt+T`), `Edit / Table -> Paste as Markdown Table` (`Ctrl+Alt+V`), contextual right-click menu entries, and `kmark-cli convert-table <file> [-o out.md]` while keeping `Ctrl+V` unaltered.
+
 ## [0.1.3] - 2026-11-20
 
 ### Added
