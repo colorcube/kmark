@@ -63,6 +63,16 @@ pub struct InlineToken {
     pub style: StyleFlags,
 }
 
+/// A URL or autolink span detected inside raw text (`range` is relative to the input slice).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetectedUrl {
+    /// Byte range within the scanned string (`0 <= range.start < range.end <= text.len()`).
+    pub range: Range<usize>,
+    /// Normalized target URL ready for opening (e.g. `www.kde.org` -> `https://www.kde.org`,
+    /// `info@kde.org` -> `mailto:info@kde.org`).
+    pub url: String,
+}
+
 /// Tokenizes `text` (which starts at `base_offset` in the document) into contiguous,
 /// non-overlapping [`InlineToken`]s covering every byte of `text`.
 #[must_use]
@@ -265,6 +275,47 @@ fn parse_inline_recursive(
                 style: inherited.union(StyleFlags::MUTED),
             });
             pos = close_end;
+            plain_start = pos;
+            continue;
+        }
+
+        // 5b. CommonMark angle-bracket autolinks `<https://...>` and `<user@domain.tld>`
+        if b == b'<'
+            && let Some((inner_start, inner_end, total_end, url)) = parse_angle_autolink(text, pos)
+        {
+            flush_plain(plain_start, pos, out);
+            out.push(InlineToken {
+                range: base.saturating_add(pos)..base.saturating_add(inner_start),
+                kind: InlineTokenKind::SyntaxMarker,
+                style: inherited.union(StyleFlags::MUTED),
+            });
+            out.push(InlineToken {
+                range: base.saturating_add(inner_start)..base.saturating_add(inner_end),
+                kind: InlineTokenKind::LinkText { url },
+                style: inherited.union(StyleFlags::LINK),
+            });
+            out.push(InlineToken {
+                range: base.saturating_add(inner_end)..base.saturating_add(total_end),
+                kind: InlineTokenKind::SyntaxMarker,
+                style: inherited.union(StyleFlags::MUTED),
+            });
+            pos = total_end;
+            plain_start = pos;
+            continue;
+        }
+
+        // 5c. GFM bare URLs (`https://...`, `http://...`, `ftp://...`, `file:///...`, `mailto:...`, `www....`)
+        // Parsed before symmetric delimiters so `*` or Base64 `==` inside URLs are never mangled as emphasis/highlight.
+        if matches!(b, b'h' | b'H' | b'f' | b'F' | b'm' | b'M' | b'w' | b'W')
+            && let Some((url_end, url)) = parse_bare_url_at(text, pos)
+        {
+            flush_plain(plain_start, pos, out);
+            out.push(InlineToken {
+                range: base.saturating_add(pos)..base.saturating_add(url_end),
+                kind: InlineTokenKind::LinkText { url },
+                style: inherited.union(StyleFlags::LINK),
+            });
+            pos = url_end;
             plain_start = pos;
             continue;
         }
@@ -755,4 +806,388 @@ fn merge_adjacent_text_tokens(tokens: &mut Vec<InlineToken>) {
         write = write.saturating_add(1);
     }
     tokens.truncate(write);
+}
+
+const MAX_AUTOLINK_BYTES: usize = 2048;
+
+/// Scans `text` (such as a `Source`, `PlainText`, or code line) for angle-bracket autolinks
+/// (`<https://...>`, `<user@domain.tld>`) and GFM bare URLs (`https://...`, `http://...`,
+/// `ftp://...`, `file:///...`, `mailto:...`, `www....`).
+#[must_use]
+pub fn find_urls_in_text(text: &str) -> Vec<DetectedUrl> {
+    let bytes = text.as_bytes();
+    if !bytes
+        .iter()
+        .any(|&b| matches!(b, b':' | b'@' | b'w' | b'W'))
+    {
+        return Vec::new();
+    }
+
+    let mut urls = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let b = bytes.get(pos).copied().unwrap_or(0);
+        if b == b'<'
+            && let Some((inner_start, inner_end, total_end, url)) = parse_angle_autolink(text, pos)
+        {
+            urls.push(DetectedUrl {
+                range: inner_start..inner_end,
+                url,
+            });
+            pos = total_end;
+            continue;
+        }
+        if matches!(b, b'h' | b'H' | b'f' | b'F' | b'm' | b'M' | b'w' | b'W')
+            && let Some((url_end, url)) = parse_bare_url_at(text, pos)
+        {
+            urls.push(DetectedUrl {
+                range: pos..url_end,
+                url,
+            });
+            pos = url_end;
+            continue;
+        }
+        pos = next_char_end(text, pos);
+    }
+    urls
+}
+
+fn parse_angle_autolink(text: &str, pos: usize) -> Option<(usize, usize, usize, String)> {
+    let rest = text.get(pos..)?;
+    if !rest.starts_with('<') {
+        return None;
+    }
+    let after_open = rest.get(1..)?;
+    let scan_cap = after_open.len().min(MAX_AUTOLINK_BYTES);
+    let mut close_rel: Option<usize> = None;
+    for (idx, ch) in after_open.char_indices() {
+        if idx >= scan_cap {
+            return None;
+        }
+        if ch == '>' {
+            close_rel = Some(idx);
+            break;
+        }
+        if ch.is_whitespace() || ch.is_control() || ch == '<' {
+            return None;
+        }
+    }
+    let rel_end = close_rel?;
+    if rel_end == 0 {
+        return None;
+    }
+    let inner = after_open.get(..rel_end)?;
+    let inner_start = pos.saturating_add(1);
+    let inner_end = inner_start.saturating_add(rel_end);
+    let total_end = inner_end.saturating_add(1);
+
+    // 1. `<mailto:user@domain.tld>`
+    if inner
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("mailto:"))
+    {
+        let addr = inner.get(7..)?;
+        if is_valid_email(addr) {
+            return Some((inner_start, inner_end, total_end, inner.to_owned()));
+        }
+        return None;
+    }
+
+    // 2. `<scheme://...>` (`https://`, `http://`, `ftp://`, `file:///`, `ssh://`, `irc://`, etc.)
+    if let Some(colon_slash_pos) = inner.find("://") {
+        let scheme = inner.get(..colon_slash_pos)?;
+        let body = inner.get(colon_slash_pos.saturating_add(3)..)?;
+        if is_valid_uri_scheme(scheme) && !body.is_empty() {
+            let valid_body = if scheme.eq_ignore_ascii_case("file") {
+                body.starts_with('/') && body.len() >= 2
+            } else {
+                has_valid_url_host(body)
+            };
+            if valid_body {
+                return Some((inner_start, inner_end, total_end, inner.to_owned()));
+            }
+        }
+        return None;
+    }
+
+    // 3. `<user@domain.tld>` email autolink
+    if is_valid_email(inner) {
+        return Some((inner_start, inner_end, total_end, format!("mailto:{inner}")));
+    }
+
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BareUrlKind {
+    StandardScheme,
+    File,
+    Mailto,
+    Www,
+}
+
+fn parse_bare_url_at(text: &str, pos: usize) -> Option<(usize, String)> {
+    let rest = text.get(pos..)?;
+    let (prefix_len, kind) = if has_ascii_prefix_ignore_case(rest, "https://") {
+        (8usize, BareUrlKind::StandardScheme)
+    } else if has_ascii_prefix_ignore_case(rest, "http://") {
+        (7usize, BareUrlKind::StandardScheme)
+    } else if has_ascii_prefix_ignore_case(rest, "ftp://") {
+        (6usize, BareUrlKind::StandardScheme)
+    } else if has_ascii_prefix_ignore_case(rest, "file://") {
+        (7usize, BareUrlKind::File)
+    } else if has_ascii_prefix_ignore_case(rest, "mailto:") {
+        (7usize, BareUrlKind::Mailto)
+    } else if has_ascii_prefix_ignore_case(rest, "www.") {
+        (4usize, BareUrlKind::Www)
+    } else {
+        return None;
+    };
+
+    if !is_valid_bare_url_start(text, pos, kind == BareUrlKind::Www) {
+        return None;
+    }
+
+    let body_slice = rest.get(prefix_len..)?;
+    let scan_cap = body_slice.len().min(MAX_AUTOLINK_BYTES);
+    let mut raw_rel_end = 0usize;
+    let mut open_brackets = 0usize;
+
+    for (idx, ch) in body_slice.char_indices() {
+        if idx >= scan_cap {
+            break;
+        }
+        if ch.is_whitespace() || ch.is_control() || matches!(ch, '<' | '>' | '"' | '`') {
+            break;
+        }
+        if ch == '[' {
+            open_brackets = open_brackets.saturating_add(1);
+        } else if ch == ']' {
+            // Stop immediately at an unmatched `]` so `[https://kde.org](...)` never swallows `](...)`.
+            if open_brackets == 0 {
+                break;
+            }
+            open_brackets = open_brackets.saturating_sub(1);
+        }
+        raw_rel_end = idx.saturating_add(ch.len_utf8());
+    }
+
+    if raw_rel_end == 0 {
+        return None;
+    }
+
+    let raw_end = pos.saturating_add(prefix_len).saturating_add(raw_rel_end);
+    let end = trim_bare_url_end(text, pos, pos.saturating_add(prefix_len), raw_end);
+    if end <= pos.saturating_add(prefix_len) {
+        return None;
+    }
+
+    let matched = text.get(pos..end)?;
+    let body = matched.get(prefix_len..)?;
+
+    match kind {
+        BareUrlKind::StandardScheme => {
+            if !has_valid_url_host(body) {
+                return None;
+            }
+            Some((end, matched.to_owned()))
+        }
+        BareUrlKind::File => {
+            if !body.starts_with('/') || body.len() < 2 {
+                return None;
+            }
+            Some((end, matched.to_owned()))
+        }
+        BareUrlKind::Mailto => {
+            if !is_valid_email(body) {
+                return None;
+            }
+            Some((end, matched.to_owned()))
+        }
+        BareUrlKind::Www => {
+            if !has_valid_www_domain(body) {
+                return None;
+            }
+            Some((end, format!("https://{matched}")))
+        }
+    }
+}
+
+fn has_ascii_prefix_ignore_case(s: &str, prefix: &str) -> bool {
+    s.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn is_valid_bare_url_start(text: &str, pos: usize, is_www: bool) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    let Some(prev) = text
+        .get(..pos)
+        .and_then(|before| before.chars().next_back())
+    else {
+        return true;
+    };
+    if prev.is_alphanumeric() || matches!(prev, '_' | '/' | '@' | ':') {
+        return false;
+    }
+    if is_www && matches!(prev, '.' | '-') {
+        return false;
+    }
+    true
+}
+
+fn trim_bare_url_end(text: &str, start: usize, min_end: usize, mut end: usize) -> usize {
+    let before = text.get(..start).unwrap_or("");
+    let preceded_by_eq = before.ends_with("==");
+    let preceded_by_underscore = before.ends_with('_');
+
+    while end > min_end {
+        let Some(current) = text.get(start..end) else {
+            break;
+        };
+        let Some(last_ch) = current.chars().next_back() else {
+            break;
+        };
+        let strip = match last_ch {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | '~' => true,
+            '=' => preceded_by_eq,
+            '_' => preceded_by_underscore,
+            ')' => count_byte(current, b'(') < count_byte(current, b')'),
+            ']' => count_byte(current, b'[') < count_byte(current, b']'),
+            '}' => count_byte(current, b'{') < count_byte(current, b'}'),
+            _ => false,
+        };
+        if strip {
+            end = end.saturating_sub(last_ch.len_utf8());
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn count_byte(s: &str, needle: u8) -> usize {
+    s.as_bytes().iter().filter(|&&b| b == needle).count()
+}
+
+fn is_valid_uri_scheme(scheme: &str) -> bool {
+    let bytes = scheme.as_bytes();
+    if bytes.len() < 2 || bytes.len() > 16 {
+        return false;
+    }
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+fn split_authority_host(body: &str) -> &str {
+    let end = body.find(['/', '?', '#']).unwrap_or(body.len());
+    let authority = body.get(..end).unwrap_or("");
+    let after_userinfo = authority
+        .rfind('@')
+        .and_then(|idx| authority.get(idx.saturating_add(1)..))
+        .unwrap_or(authority);
+
+    if let Some(rest_ipv6) = after_userinfo.strip_prefix('[')
+        && let Some(close_idx) = rest_ipv6.find(']')
+    {
+        return after_userinfo
+            .get(..close_idx.saturating_add(2))
+            .unwrap_or("");
+    }
+    let host_end = after_userinfo.find(':').unwrap_or(after_userinfo.len());
+    after_userinfo.get(..host_end).unwrap_or("")
+}
+
+fn has_valid_url_host(body: &str) -> bool {
+    let host = split_authority_host(body);
+    if host.is_empty() {
+        return false;
+    }
+    if host.starts_with('[') && host.ends_with(']') {
+        return host.len() >= 4;
+    }
+    let Some(first) = host.chars().next() else {
+        return false;
+    };
+    let Some(last) = host.chars().next_back() else {
+        return false;
+    };
+    first.is_alphanumeric()
+        && last.is_alphanumeric()
+        && !host.contains("..")
+        && host
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-'))
+}
+
+fn has_valid_www_domain(body: &str) -> bool {
+    let host = split_authority_host(body);
+    if !has_valid_url_host(host) {
+        return false;
+    }
+    let Some((_init, tld)) = host.rsplit_once('.') else {
+        return false;
+    };
+    tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic)
+}
+
+fn is_valid_email(candidate: &str) -> bool {
+    let Some((local, domain)) = candidate.split_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return false;
+    }
+    if local.starts_with('.') || local.ends_with('.') || local.contains("..") {
+        return false;
+    }
+    let local_ok = local.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'.' | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'/'
+                    | b'='
+                    | b'?'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'{'
+                    | b'|'
+                    | b'}'
+                    | b'~'
+                    | b'-'
+            )
+    });
+    if !local_ok {
+        return false;
+    }
+    let mut label_count = 0usize;
+    let mut last_label = "";
+    for label in domain.split('.') {
+        if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
+            return false;
+        }
+        label_count = label_count.saturating_add(1);
+        last_label = label;
+    }
+    label_count >= 2
+        && last_label.chars().count() >= 2
+        && last_label.chars().all(char::is_alphabetic)
 }

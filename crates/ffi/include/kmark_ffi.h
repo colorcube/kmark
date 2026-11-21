@@ -468,6 +468,7 @@ KMarkPointerResult kmark_session_pointer_press(
 void kmark_session_pointer_drag(KMarkSession* session, float vx, float vy);
 void kmark_session_drop_cursor_at(KMarkSession* session, float vx, float vy);
 bool kmark_session_hover_interactive(const KMarkSession* session, float vx, float vy, bool ctrl);
+char* kmark_session_link_at_alloc(const KMarkSession* session, float vx, float vy);
 void kmark_session_set_scroll_y(KMarkSession* session, float scroll_y);
 void kmark_session_scroll_pixels(KMarkSession* session, float delta_y);
 void kmark_session_set_scroll_x(KMarkSession* session, float scroll_x);
@@ -488,6 +489,7 @@ size_t kmark_session_replace_all(KMarkSession* session, const char* replacement_
 
 /* Outline & Viewport rendering */
 void kmark_session_jump_to_offset(KMarkSession* session, size_t byte_offset);
+bool kmark_session_jump_to_anchor(KMarkSession* session, const char* anchor_utf8);
 KMarkOutlineView kmark_session_outline(KMarkSession* session);
 KMarkToolbarState kmark_session_toolbar_state(const KMarkSession* session);
 KMarkFrameView kmark_session_render_frame(

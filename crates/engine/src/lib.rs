@@ -871,4 +871,90 @@ fn demo() {
             messy
         );
     }
+
+    #[test]
+    fn bare_urls_are_clickable_with_ctrl_across_all_modes_while_shift_selects() {
+        let mut session = Session::new_headless();
+        session.insert_text(
+            "# Zielabschnitt\n\nBesuche www.kde.org/plasma und [Oben](#zielabschnitt).",
+        );
+        let mut measurer = kmark_layout::FallbackMeasurer;
+
+        for mode in [
+            ViewMode::Wysiwyg,
+            ViewMode::LivePreview,
+            ViewMode::Source,
+            ViewMode::PlainText,
+        ] {
+            session.execute_command(Command::SetViewMode(mode));
+            let frame = session
+                .render_viewport(900.0, 600.0, &mut measurer)
+                .unwrap();
+
+            // Locate the glyph span carrying `https://www.kde.org/plasma`
+            let mut url_hit_point: Option<(f32, f32)> = None;
+            let mut row_y_mid = 0.0f32;
+            for row in &frame.visual_rows {
+                for span in &row.spans {
+                    if span.link_url.as_deref() == Some("https://www.kde.org/plasma") {
+                        url_hit_point = Some((
+                            span.x + span.width * 0.5 - frame.scroll_x,
+                            row.y_doc + row.height * 0.5 - frame.scroll_y,
+                        ));
+                        row_y_mid = row.y_doc + row.height * 0.5 - frame.scroll_y;
+                        break;
+                    }
+                }
+            }
+            let (ux, uy) = url_hit_point.unwrap_or_else(|| {
+                panic!("Expected clickable www.kde.org/plasma span in mode {mode:?}");
+            });
+
+            // 1. Hovering reports the normalized URL and enables the hand cursor only with Ctrl
+            assert_eq!(
+                session.link_at(ux, uy).as_deref(),
+                Some("https://www.kde.org/plasma")
+            );
+            assert!(!session.hover_interactive_at(ux, uy, false));
+            assert!(session.hover_interactive_at(ux, uy, true));
+
+            // 2. Empty margin to the right and empty canvas below never falsely report a link
+            assert_eq!(session.link_at(880.0, row_y_mid), None);
+            assert_eq!(session.link_at(ux, 550.0), None);
+
+            // 3. Ctrl+Click opens the external URL without altering selection/text
+            let ctrl_res = session.handle_pointer_press(
+                ux,
+                uy,
+                1,
+                KeyModifiers {
+                    ctrl: true,
+                    ..KeyModifiers::default()
+                },
+            );
+            assert_eq!(
+                ctrl_res,
+                PointerAction::OpenExternalUrl("https://www.kde.org/plasma".to_owned())
+            );
+
+            // 4. Plain click places the caret; Shift+Click extends text selection instead of opening!
+            let _ = session.handle_pointer_press(ux - 20.0, uy, 1, KeyModifiers::default());
+            let shift_res = session.handle_pointer_press(
+                ux + 10.0,
+                uy,
+                1,
+                KeyModifiers {
+                    shift: true,
+                    ..KeyModifiers::default()
+                },
+            );
+            assert_eq!(shift_res, PointerAction::Handled);
+            assert!(!session.active_doc().unwrap().selection.is_empty());
+        }
+
+        // 5. `#zielabschnitt` jumps to the target heading in-document
+        assert!(session.jump_to_anchor("#zielabschnitt"));
+        let head = session.active_doc().unwrap().selection.head;
+        assert_eq!(head, "# ".len());
+    }
 }

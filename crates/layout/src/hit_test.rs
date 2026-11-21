@@ -121,7 +121,8 @@ impl ViewportFrame {
             }
         }
         // Fallback nearest vertical row if `doc_y` fell in inter-block spacing.
-        if !(doc_y >= chosen.y_doc && doc_y <= chosen.y_doc + chosen.height) {
+        let in_vertical_band = doc_y >= chosen.y_doc && doc_y <= chosen.y_doc + chosen.height;
+        if !in_vertical_band {
             let mut min_v = f32::MAX;
             for row in &self.visual_rows {
                 let v = if doc_y < row.y_doc {
@@ -138,7 +139,7 @@ impl ViewportFrame {
             }
         }
 
-        byte_offset_in_visual_row(chosen, doc_x)
+        byte_offset_in_visual_row(chosen, doc_x, in_vertical_band)
     }
 
     /// Computes target byte offset when pressing `Up` (`delta = -1`) or `Down` (`delta = +1`).
@@ -194,7 +195,7 @@ impl ViewportFrame {
     }
 }
 
-fn byte_offset_in_visual_row(row: &VisualRow, doc_x: f32) -> HitTarget {
+fn byte_offset_in_visual_row(row: &VisualRow, doc_x: f32, in_vertical_band: bool) -> HitTarget {
     let visible_spans: Vec<&PositionedGlyphSpan> =
         row.spans.iter().filter(|s| !s.is_hidden_marker).collect();
     if visible_spans.is_empty() {
@@ -204,11 +205,11 @@ fn byte_offset_in_visual_row(row: &VisualRow, doc_x: f32) -> HitTarget {
         };
     }
     if let Some(first) = visible_spans.first()
-        && doc_x <= first.x
+        && doc_x < first.x
     {
         return HitTarget::Text {
             byte_offset: first.doc_range.start,
-            link_url: first.link_url.clone(),
+            link_url: None,
         };
     }
     for span in &visible_spans {
@@ -220,14 +221,18 @@ fn byte_offset_in_visual_row(row: &VisualRow, doc_x: f32) -> HitTarget {
                     .start
                     .saturating_add(rel)
                     .min(span.doc_range.end),
-                link_url: span.link_url.clone(),
+                link_url: if in_vertical_band {
+                    span.link_url.clone()
+                } else {
+                    None
+                },
             };
         }
     }
     if let Some(last) = visible_spans.last() {
         return HitTarget::Text {
             byte_offset: last.doc_range.end,
-            link_url: last.link_url.clone(),
+            link_url: None,
         };
     }
     HitTarget::Text {

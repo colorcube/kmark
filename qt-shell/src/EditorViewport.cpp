@@ -40,6 +40,7 @@
 #include <QStyleOptionButton>
 #include <QTextLayout>
 #include <QTextOption>
+#include <QToolTip>
 #include <QUrl>
 #include <QWheelEvent>
 #include <algorithm>
@@ -265,6 +266,8 @@ QString EditorViewport::resolveImagePath(const QString& rawSrc) const {
     }
     if (src.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
         || src.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)
+        || src.startsWith(QStringLiteral("ftp://"), Qt::CaseInsensitive)
+        || src.startsWith(QStringLiteral("mailto:"), Qt::CaseInsensitive)
         || src.startsWith(QStringLiteral("data:"), Qt::CaseInsensitive)) {
         return {};
     }
@@ -287,6 +290,67 @@ QString EditorViewport::resolveImagePath(const QString& rawSrc) const {
         return cwdCandidate.canonicalFilePath();
     }
     return {};
+}
+
+void EditorViewport::openLinkUrl(const QString& rawUrl) {
+    const QString trimmed = rawUrl.trimmed();
+    if (trimmed.isEmpty() || m_session == nullptr) {
+        return;
+    }
+    if (trimmed.startsWith(QLatin1Char('#')) && trimmed.size() > 1) {
+        const QByteArray anchorUtf8 = trimmed.toUtf8();
+        if (kmark_session_jump_to_anchor(m_session, anchorUtf8.constData())) {
+            notifyDocumentChanged();
+        }
+        return;
+    }
+    const QString localResolved = resolveImagePath(trimmed);
+    if (!localResolved.isEmpty()) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(localResolved));
+    } else {
+        QDesktopServices::openUrl(QUrl::fromUserInput(trimmed));
+    }
+}
+
+void EditorViewport::updateHoverState(const QPointF& pos, bool ctrlPressed) {
+    if (m_session == nullptr || pos.x() < 0.0 || pos.y() < 0.0) {
+        viewport()->setCursor(Qt::IBeamCursor);
+        if (!m_lastHoveredLink.isEmpty()) {
+            m_lastHoveredLink.clear();
+            viewport()->setToolTip(QString());
+            QToolTip::hideText();
+        }
+        return;
+    }
+
+    const float vx = static_cast<float>(pos.x());
+    const float vy = static_cast<float>(pos.y());
+    const bool interactive = kmark_session_hover_interactive(m_session, vx, vy, ctrlPressed);
+    viewport()->setCursor(interactive ? Qt::PointingHandCursor : Qt::IBeamCursor);
+
+    QString hoveredUrl;
+    char* rawLink = kmark_session_link_at_alloc(m_session, vx, vy);
+    if (rawLink != nullptr) {
+        hoveredUrl = QString::fromUtf8(rawLink);
+        kmark_string_free(rawLink);
+    }
+
+    if (!hoveredUrl.isEmpty()) {
+        if (m_lastHoveredLink != hoveredUrl) {
+            m_lastHoveredLink = hoveredUrl;
+            const UiLang lang = currentUiLang();
+            const QString tip = trBi(
+                lang,
+                "%1\n(Ctrl+Click to open)",
+                "%1\n(Strg+Klick zum Öffnen)"
+            ).arg(hoveredUrl);
+            viewport()->setToolTip(tip);
+        }
+    } else if (!m_lastHoveredLink.isEmpty()) {
+        m_lastHoveredLink.clear();
+        viewport()->setToolTip(QString());
+        QToolTip::hideText();
+    }
 }
 
 QString EditorViewport::makeFriendlyMarkdownPath(const QString& absPath) const {
@@ -882,7 +946,18 @@ void EditorViewport::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
+    if (event->key() == Qt::Key_Control) {
+        updateHoverState(m_lastMousePos, true);
+    }
+
     QAbstractScrollArea::keyPressEvent(event);
+}
+
+void EditorViewport::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Control && !event->isAutoRepeat()) {
+        updateHoverState(m_lastMousePos, false);
+    }
+    QAbstractScrollArea::keyReleaseEvent(event);
 }
 
 void EditorViewport::inputMethodEvent(QInputMethodEvent* event) {
@@ -927,6 +1002,7 @@ void EditorViewport::mousePressEvent(QMouseEvent* event) {
     }
     setFocus(Qt::MouseFocusReason);
     const QPointF pos = event->position();
+    m_lastMousePos = pos;
     const Qt::KeyboardModifiers mods = event->modifiers();
     const KMarkPointerResult res = kmark_session_pointer_press(
         m_session,
@@ -945,12 +1021,7 @@ void EditorViewport::mousePressEvent(QMouseEvent* event) {
     }
 
     if (res.tag == KMARK_PTR_OPEN_URL && !payload.isEmpty()) {
-        const QString localResolved = resolveImagePath(payload);
-        if (!localResolved.isEmpty()) {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(localResolved));
-        } else {
-            QDesktopServices::openUrl(QUrl::fromUserInput(payload));
-        }
+        openLinkUrl(payload);
     } else if (res.tag == KMARK_PTR_EDIT_CODE_LANGUAGE) {
         emit codeLanguageBadgeClicked(res.byte_offset, payload, event->globalPosition().toPoint());
         return;
@@ -986,21 +1057,21 @@ void EditorViewport::mouseDoubleClickEvent(QMouseEvent* event) {
 void EditorViewport::mouseMoveEvent(QMouseEvent* event) {
     if (m_session != nullptr) {
         const QPointF pos = event->position();
+        m_lastMousePos = pos;
         if (event->buttons().testFlag(Qt::LeftButton)) {
             kmark_session_pointer_drag(m_session, static_cast<float>(pos.x()), static_cast<float>(pos.y()));
             notifyDocumentChanged();
         } else {
-            const bool ctrl = event->modifiers().testFlag(Qt::ControlModifier);
-            const bool interactive = kmark_session_hover_interactive(
-                m_session,
-                static_cast<float>(pos.x()),
-                static_cast<float>(pos.y()),
-                ctrl
-            );
-            viewport()->setCursor(interactive ? Qt::PointingHandCursor : Qt::IBeamCursor);
+            updateHoverState(pos, event->modifiers().testFlag(Qt::ControlModifier));
         }
     }
     QAbstractScrollArea::mouseMoveEvent(event);
+}
+
+void EditorViewport::leaveEvent(QEvent* event) {
+    m_lastMousePos = QPointF(-1.0, -1.0);
+    updateHoverState(m_lastMousePos, false);
+    QAbstractScrollArea::leaveEvent(event);
 }
 
 UiLang EditorViewport::currentUiLang() const {
@@ -1320,7 +1391,41 @@ void EditorViewport::contextMenuEvent(QContextMenuEvent* event) {
     const bool hasSelection = (rawSel != nullptr && rawSel[0] != '\0');
     kmark_string_free(rawSel);
 
+    QString linkUrl;
+    char* rawLink = kmark_session_link_at_alloc(
+        m_session,
+        static_cast<float>(hitPos.x()),
+        static_cast<float>(hitPos.y())
+    );
+    if (rawLink != nullptr) {
+        linkUrl = QString::fromUtf8(rawLink);
+        kmark_string_free(rawLink);
+    }
+
     QMenu menu(this);
+    if (!linkUrl.isEmpty()) {
+        QAction* actOpenLink = menu.addAction(
+            QIcon::fromTheme(
+                QStringLiteral("external-link-symbolic"),
+                QIcon::fromTheme(QStringLiteral("internet-web-browser"))
+            ),
+            trBi(lang, "Open &Link", "&Link öffnen")
+        );
+        connect(actOpenLink, &QAction::triggered, this, [this, linkUrl]() {
+            openLinkUrl(linkUrl);
+        });
+
+        QAction* actCopyLink = menu.addAction(
+            QIcon::fromTheme(QStringLiteral("edit-copy")),
+            trBi(lang, "Copy Link &Address", "Link-&Adresse kopieren")
+        );
+        connect(actCopyLink, &QAction::triggered, this, [linkUrl]() {
+            QApplication::clipboard()->setText(linkUrl);
+        });
+
+        menu.addSeparator();
+    }
+
     QAction* actUndo = menu.addAction(
         QIcon::fromTheme(QStringLiteral("edit-undo")),
         trBi(lang, "&Undo", "&Rückgängig")
@@ -1543,6 +1648,7 @@ void EditorViewport::focusInEvent(QFocusEvent* event) {
 void EditorViewport::focusOutEvent(QFocusEvent* event) {
     QAbstractScrollArea::focusOutEvent(event);
     m_caretTimer.stop();
+    updateHoverState(m_lastMousePos, false);
     viewport()->update();
 }
 

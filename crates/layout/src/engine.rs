@@ -1914,6 +1914,7 @@ fn layout_source_line(
     let m = measurer.measure_run(&txt, role, font_px, is_heading_src, false);
     let base_off = (line_h - (m.metrics.ascent + m.metrics.descent)) * 0.5 + m.metrics.ascent;
     out.widest = out.widest.max(m.total_width);
+    let line_urls = kmark_syntax::find_urls_in_text(&txt);
 
     let starts = if req.config.word_wrap {
         wrap_row_starts(&txt, &m.grapheme_ends, geom.prose_w)
@@ -1927,43 +1928,34 @@ fn layout_source_line(
             .copied()
             .unwrap_or(txt.len());
         let row_y = y_doc + (k as f32) * line_h;
-        let sub = slice_measured_run(&m, s, e);
-        let row_txt = txt.get(s..e).unwrap_or("");
+        let paint = row_y + line_h >= req.scroll_y - 32.0 && row_y <= req.scroll_y + geom.vh + 32.0;
+        let baseline_v = (row_y - req.scroll_y) + base_off;
 
-        if row_y + line_h >= req.scroll_y - 32.0
-            && row_y <= req.scroll_y + geom.vh + 32.0
-            && !row_txt.is_empty()
-        {
-            out.fg_cmds.push(DrawCmd::Text {
-                x: content_x,
-                baseline_y: (row_y - req.scroll_y) + base_off,
-                text: row_txt.to_owned(),
+        let (spans, width) = emit_segmented_raw_row(
+            RawRowPaintSpec {
+                line_txt: &txt,
+                line_doc_start: r.start,
+                row_rel_range: s..e,
+                measured_line: &m,
+                urls: &line_urls,
+                start_x: content_x,
+                baseline_v,
+                paint,
                 role,
-                size_px: font_px,
+                font_px,
                 bold: is_heading_src,
-                italic: false,
-                color,
-            });
-        }
+                base_color: color,
+                link_color: req.config.palette.link_fg,
+            },
+            &mut out.fg_cmds,
+        );
+
         let is_last = k.saturating_add(1) == row_count;
         let row_start = r.start.saturating_add(s);
         let row_end = if is_last {
             r.end
         } else {
             r.start.saturating_add(e)
-        };
-        let width = sub.total_width;
-        let spans = if row_txt.is_empty() {
-            Vec::new()
-        } else {
-            vec![PositionedGlyphSpan {
-                doc_range: row_start..r.start.saturating_add(e),
-                x: content_x,
-                width,
-                measured: sub,
-                is_hidden_marker: false,
-                link_url: None,
-            }]
         };
         out.visual_rows.push(VisualRow {
             y_doc: row_y,
@@ -1979,8 +1971,148 @@ fn layout_source_line(
     u32::try_from(row_count).unwrap_or(u32::MAX).max(1)
 }
 
+pub(crate) struct RawRowPaintSpec<'a> {
+    pub line_txt: &'a str,
+    pub line_doc_start: usize,
+    pub row_rel_range: Range<usize>,
+    pub measured_line: &'a MeasuredRun,
+    pub urls: &'a [kmark_syntax::DetectedUrl],
+    pub start_x: f32,
+    pub baseline_v: f32,
+    pub paint: bool,
+    pub role: FontRole,
+    pub font_px: f32,
+    pub bold: bool,
+    pub base_color: Rgba,
+    pub link_color: Rgba,
+}
+
+/// Splits a measured line row `s..e` into plain and URL-highlighted glyph spans while preserving
+/// exact single-pass grapheme x-coordinates.
+pub(crate) fn emit_segmented_raw_row(
+    spec: RawRowPaintSpec<'_>,
+    fg_cmds: &mut Vec<DrawCmd>,
+) -> (Vec<PositionedGlyphSpan>, f32) {
+    let s = spec.row_rel_range.start;
+    let e = spec.row_rel_range.end;
+    let Some(row_txt) = spec.line_txt.get(s..e) else {
+        return (Vec::new(), 0.0);
+    };
+    if row_txt.is_empty() {
+        return (Vec::new(), 0.0);
+    }
+
+    let has_overlap = spec
+        .urls
+        .iter()
+        .any(|u| u.range.end > s && u.range.start < e);
+    if !has_overlap {
+        let sub = slice_measured_run(spec.measured_line, s, e);
+        let width = sub.total_width;
+        if spec.paint {
+            fg_cmds.push(DrawCmd::Text {
+                x: spec.start_x,
+                baseline_y: spec.baseline_v,
+                text: row_txt.to_owned(),
+                role: spec.role,
+                size_px: spec.font_px,
+                bold: spec.bold,
+                italic: false,
+                color: spec.base_color,
+            });
+        }
+        let span = PositionedGlyphSpan {
+            doc_range: spec.line_doc_start.saturating_add(s)..spec.line_doc_start.saturating_add(e),
+            x: spec.start_x,
+            width,
+            measured: sub,
+            is_hidden_marker: false,
+            link_url: None,
+        };
+        return (vec![span], width);
+    }
+
+    let row_base_x = if s == 0 {
+        0.0
+    } else {
+        spec.measured_line.x_at_rel_byte(s)
+    };
+    let mut segments: Vec<(usize, usize, Option<&str>)> = Vec::new();
+    let mut cur = s;
+    for u in spec.urls {
+        if u.range.end <= cur {
+            continue;
+        }
+        if u.range.start >= e {
+            break;
+        }
+        if u.range.start > cur {
+            segments.push((cur, u.range.start, None));
+        }
+        let seg_s = u.range.start.max(cur);
+        let seg_e = u.range.end.min(e);
+        if seg_e > seg_s {
+            segments.push((seg_s, seg_e, Some(u.url.as_str())));
+        }
+        cur = seg_e;
+    }
+    if cur < e {
+        segments.push((cur, e, None));
+    }
+
+    let mut spans = Vec::with_capacity(segments.len());
+    let mut row_end_x = spec.start_x;
+    for (seg_s, seg_e, url_opt) in segments {
+        let sub = slice_measured_run(spec.measured_line, seg_s, seg_e);
+        let seg_x = spec.start_x + (spec.measured_line.x_at_rel_byte(seg_s) - row_base_x);
+        let seg_w = sub.total_width;
+        row_end_x = row_end_x.max(seg_x + seg_w);
+        if spec.paint
+            && let Some(seg_txt) = spec.line_txt.get(seg_s..seg_e)
+            && !seg_txt.is_empty()
+        {
+            let col = if url_opt.is_some() {
+                spec.link_color
+            } else {
+                spec.base_color
+            };
+            fg_cmds.push(DrawCmd::Text {
+                x: seg_x,
+                baseline_y: spec.baseline_v,
+                text: seg_txt.to_owned(),
+                role: spec.role,
+                size_px: spec.font_px,
+                bold: spec.bold,
+                italic: false,
+                color: col,
+            });
+            if url_opt.is_some() {
+                fg_cmds.push(DrawCmd::Line {
+                    x1: seg_x,
+                    y1: spec.baseline_v + 2.0,
+                    x2: seg_x + seg_w,
+                    y2: spec.baseline_v + 2.0,
+                    color: spec.link_color.with_alpha(165),
+                    width: 1.0,
+                });
+            }
+        }
+        spans.push(PositionedGlyphSpan {
+            doc_range: spec.line_doc_start.saturating_add(seg_s)
+                ..spec.line_doc_start.saturating_add(seg_e),
+            x: seg_x,
+            width: seg_w,
+            measured: sub,
+            is_hidden_marker: false,
+            link_url: url_opt.map(str::to_owned),
+        });
+    }
+
+    (spans, (row_end_x - spec.start_x).max(0.0))
+}
+
 /// Extracts the sub-run for bytes `s..e` of `m`, rebased to start at `x = 0`.
-fn slice_measured_run(m: &MeasuredRun, s: usize, e: usize) -> MeasuredRun {
+pub(crate) fn slice_measured_run(m: &MeasuredRun, s: usize, e: usize) -> MeasuredRun {
     let base_x = if s == 0 { 0.0 } else { m.x_at_rel_byte(s) };
     let grapheme_ends: Vec<(usize, f32)> = m
         .grapheme_ends

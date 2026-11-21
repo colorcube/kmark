@@ -84,9 +84,10 @@ Inline-Stile lassen sich beliebig verschachteln — etwa `**fett und *gleichzeit
 
 ## 5. Links & Bilder (inkl. Drag & Drop)
 
-### Hyperlinks
+### Hyperlinks & automatische URL-Erkennung
 - **Standard-Link**: `[KDE Community](https://kde.org)` → [KDE Community](https://kde.org) (<kbd>Ctrl+K</kbd>)
-- **Öffnen im Browser**: Halte <kbd>Ctrl</kbd> gedrückt und klicke auf den farbigen Linktext.
+- **Freistehende URLs & Autolinks**: URLs wie https://kde.org, www.qt.io sowie `<https://kde.org>` und `<info@kde.org>` werden in **allen** Ansichtsmodi (auch `Quelltext` und `TXT`) automatisch erkannt und dezent hervorgehoben.
+- **Öffnen**: Halte <kbd>Ctrl</kbd> gedrückt und klicke auf den Link bzw. die URL (oder nutze per Rechtsklick *Link öffnen* / *Link-Adresse kopieren*). Interne Anker wie `[Nach oben](#1-ansichtsmodi--bedienkonzept)` springen direkt zur passenden Überschrift.
 
 ### Bilder einfügen, Bildunterschriften & Größe
 - **Grundsyntax**: `![Alternativtext](pfad/zum/bild.png)` (<kbd>Ctrl+Shift+I</kbd>)
@@ -267,9 +268,10 @@ Inline styles can be nested freely — for example `**bold and *italic* together
 
 ## 5. Links & Images (Including Drag & Drop)
 
-### Hyperlinks
+### Hyperlinks & Automatic URL Detection
 - **Standard Link**: `[KDE Community](https://kde.org)` → [KDE Community](https://kde.org) (<kbd>Ctrl+K</kbd>)
-- **Open in Browser**: Hold <kbd>Ctrl</kbd> and click any formatted link.
+- **Bare URLs & Autolinks**: Bare URLs such as https://kde.org, www.qt.io, `<https://kde.org>`, and `<info@kde.org>` are automatically recognized and subtly highlighted across **all** view modes (including `Source` and `TXT`).
+- **Opening Links**: Hold <kbd>Ctrl</kbd> and click any link or URL (or right-click to choose *Open Link* / *Copy Link Address*). Internal heading anchors like `[Top](#1-view-modes--editing-philosophy)` jump directly to the matching section.
 
 ### Embedding Images, Captions & Relative Sizes
 - **Basic Syntax**: `![Alt text](path/to/image.png)` (<kbd>Ctrl+Shift+I</kbd>)

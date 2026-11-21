@@ -1612,10 +1612,23 @@ impl Session {
                 byte_offset,
                 link_url,
             } => {
-                if mods.ctrl
-                    && let Some(url) = link_url
-                {
-                    return PointerAction::OpenExternalUrl(url);
+                if mods.ctrl {
+                    let resolved_url = link_url.or_else(|| {
+                        fallback_raw_url_at_point(&tab.rope, frame, vx, vy, byte_offset)
+                    });
+                    if let Some(url) = resolved_url {
+                        if let Some(slug) = url.strip_prefix('#').filter(|s| !s.is_empty())
+                            && let Some(entry) = tab
+                                .outline
+                                .iter()
+                                .find(|e| e.slug.eq_ignore_ascii_case(slug))
+                        {
+                            let target_offset = entry.byte_offset;
+                            self.jump_to_byte_offset(target_offset);
+                            return PointerAction::Handled;
+                        }
+                        return PointerAction::OpenExternalUrl(url);
+                    }
                 }
                 let clamped = tab.rope.clamp_char_boundary(byte_offset);
                 if click_count >= 3 {
@@ -1680,7 +1693,50 @@ impl Session {
             HitTarget::Checkbox { .. }
             | HitTarget::CodeLanguageBadge { .. }
             | HitTarget::CalloutBadge { .. } => true,
-            HitTarget::Text { link_url, .. } => ctrl && link_url.is_some(),
+            HitTarget::Text {
+                byte_offset,
+                link_url,
+            } => {
+                ctrl && (link_url.is_some()
+                    || fallback_raw_url_at_point(&tab.rope, frame, vx, vy, byte_offset).is_some())
+            }
+        }
+    }
+
+    /// Returns the resolved link or URL under `(vx, vy)`, if any (for tooltips and context menus).
+    #[must_use]
+    pub fn link_at(&self, vx: f32, vy: f32) -> Option<String> {
+        let tab = self.active_doc()?;
+        let frame = tab.last_frame.as_ref()?;
+        match frame.hit_test(vx, vy) {
+            HitTarget::Text {
+                byte_offset,
+                link_url,
+            } => link_url
+                .or_else(|| fallback_raw_url_at_point(&tab.rope, frame, vx, vy, byte_offset)),
+            HitTarget::Checkbox { .. }
+            | HitTarget::CodeLanguageBadge { .. }
+            | HitTarget::CalloutBadge { .. } => None,
+        }
+    }
+
+    /// Jumps to a heading matching `#slug` in the active document outline, returning `true` if found.
+    pub fn jump_to_anchor(&mut self, raw_anchor: &str) -> bool {
+        let slug = raw_anchor.trim().trim_start_matches('#');
+        if slug.is_empty() {
+            return false;
+        }
+        let target = self.active_doc().and_then(|tab| {
+            tab.outline
+                .iter()
+                .find(|e| e.slug.eq_ignore_ascii_case(slug))
+                .map(|e| e.byte_offset)
+        });
+        if let Some(byte_offset) = target {
+            self.jump_to_byte_offset(byte_offset);
+            true
+        } else {
+            false
         }
     }
 
@@ -2005,4 +2061,38 @@ fn default_view_mode_for_path(path: &Path) -> ViewMode {
         "md" | "markdown" | "mdown" | "mkd" | "mdx" => ViewMode::Wysiwyg,
         _ => ViewMode::PlainText,
     }
+}
+
+fn fallback_raw_url_at_point(
+    rope: &Rope,
+    frame: &ViewportFrame,
+    vx: f32,
+    vy: f32,
+    byte_offset: usize,
+) -> Option<String> {
+    let doc_x = vx + frame.scroll_x;
+    let doc_y = vy + frame.scroll_y;
+    let inside_visible_span = frame.visual_rows.iter().any(|row| {
+        doc_y >= row.y_doc
+            && doc_y <= row.y_doc + row.height
+            && row
+                .spans
+                .iter()
+                .any(|s| !s.is_hidden_marker && doc_x >= s.x && doc_x <= s.x + s.width)
+    });
+    if !inside_visible_span {
+        return None;
+    }
+    let clamped = rope.clamp_char_boundary(byte_offset);
+    let lc = rope.byte_to_line_col(clamped);
+    let lr = rope.line_byte_range(lc.line);
+    if lr.len() > 8192 {
+        return None;
+    }
+    let rel = clamped.saturating_sub(lr.start);
+    let line_txt = rope.slice_to_string(lr);
+    kmark_syntax::find_urls_in_text(&line_txt)
+        .into_iter()
+        .find(|u| rel >= u.range.start && rel <= u.range.end)
+        .map(|u| u.url)
 }

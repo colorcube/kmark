@@ -1597,6 +1597,19 @@ pub extern "C" fn kmark_session_hover_interactive(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_link_at_alloc(
+    session: *const KMarkSession,
+    vx: f32,
+    vy: f32,
+) -> *mut c_char {
+    with_session_ref(session, ptr::null_mut(), false, |s| {
+        s.session
+            .link_at(vx, vy)
+            .map_or_else(ptr::null_mut, |url| alloc_c_string(&url))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_set_scroll_y(session: *mut KMarkSession, scroll_y: f32) {
     with_session_mut(session, (), |s| {
         s.session.set_scroll_y(scroll_y);
@@ -1682,6 +1695,18 @@ pub extern "C" fn kmark_session_jump_to_offset(session: *mut KMarkSession, byte_
     with_session_mut(session, (), |s| {
         s.session.jump_to_byte_offset(byte_offset);
     });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_jump_to_anchor(
+    session: *mut KMarkSession,
+    anchor_utf8: *const c_char,
+) -> bool {
+    with_session_mut(session, false, |s| {
+        // SAFETY: `cstr_to_str` handles null pointers and invalid UTF-8 defensively.
+        let anchor = unsafe { cstr_to_str(anchor_utf8) };
+        s.session.jump_to_anchor(anchor)
+    })
 }
 
 #[unsafe(no_mangle)]

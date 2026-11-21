@@ -14,8 +14,8 @@ pub use blocks::{
 };
 pub use html::export_html_document;
 pub use inline::{
-    ImageSize, InlineToken, InlineTokenKind, StyleFlags, active_styles_at, format_markdown_image,
-    parse_inline_tokens,
+    DetectedUrl, ImageSize, InlineToken, InlineTokenKind, StyleFlags, active_styles_at,
+    find_urls_in_text, format_markdown_image, parse_inline_tokens,
 };
 pub use outline::{
     OutlineEntry, extract_outline, heading_slug, strip_inline_syntax, update_outline_changed_rope,
@@ -297,5 +297,70 @@ Absatz danach
         reparse_incremental(&old_rope, &new_rope, &mut blocks, mid);
         let full = parse_blocks(&new_rope);
         assert_eq!(blocks, full);
+    }
+
+    #[test]
+    fn recognizes_bare_urls_and_angle_autolinks_with_balanced_punctuation() {
+        let line = "Siehe (https://en.wikipedia.org/wiki/Rust_(programming_language).), \
+                    www.kde.org/plasma!, <info@kde.org>, <https://qt.io> und \
+                    https://example.org/auth?token=dGVzdA== sowie `https://code.only` \
+                    und <svg:path>.";
+        let tokens = parse_inline_tokens(0, line);
+        assert_eq!(tokens.first().unwrap().range.start, 0);
+        assert_eq!(tokens.last().unwrap().range.end, line.len());
+        for pair in tokens.windows(2) {
+            assert_eq!(pair[0].range.end, pair[1].range.start);
+        }
+
+        let links: Vec<(&str, &str)> = tokens
+            .iter()
+            .filter_map(|t| match &t.kind {
+                InlineTokenKind::LinkText { url } => Some((&line[t.range.clone()], url.as_str())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            links,
+            vec![
+                (
+                    "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                    "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                ),
+                ("www.kde.org/plasma", "https://www.kde.org/plasma"),
+                ("info@kde.org", "mailto:info@kde.org"),
+                ("https://qt.io", "https://qt.io"),
+                (
+                    "https://example.org/auth?token=dGVzdA==",
+                    "https://example.org/auth?token=dGVzdA==",
+                ),
+            ]
+        );
+
+        // HTML export wraps both bare URLs and angle-bracket autolinks in `<a href="…">`
+        let rope = Rope::from_str(line);
+        let blocks = parse_blocks(&rope);
+        let html = export_html_document("Links", &rope, &blocks);
+        assert!(html.contains(
+            "<a href=\"https://en.wikipedia.org/wiki/Rust_(programming_language)\">https://en.wikipedia.org/wiki/Rust_(programming_language)</a>"
+        ));
+        assert!(html.contains("<a href=\"https://www.kde.org/plasma\">www.kde.org/plasma</a>"));
+        assert!(html.contains("<a href=\"mailto:info@kde.org\">info@kde.org</a>"));
+        assert!(html.contains("<code>https://code.only</code>"));
+        assert!(html.contains("&lt;svg:path&gt;"));
+
+        // Raw source / plain-text scanner strips surrounding Markdown syntax cleanly
+        let raw_line = "Markdown [KMark](https://github.com/colorcube/kmark) sowie **https://kde.org** und ==https://qt.io==.";
+        let found = find_urls_in_text(raw_line);
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            &raw_line[found[0].range.clone()],
+            "https://github.com/colorcube/kmark"
+        );
+        assert_eq!(found[0].url, "https://github.com/colorcube/kmark");
+        assert_eq!(&raw_line[found[1].range.clone()], "https://kde.org");
+        assert_eq!(found[1].url, "https://kde.org");
+        assert_eq!(&raw_line[found[2].range.clone()], "https://qt.io");
+        assert_eq!(found[2].url, "https://qt.io");
     }
 }

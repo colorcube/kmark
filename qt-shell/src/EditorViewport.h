@@ -49,11 +49,13 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
     void inputMethodEvent(QInputMethodEvent* event) override;
     QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
@@ -127,6 +129,8 @@ private:
     QFont makeFont(uint8_t fontRole, float sizePx, bool bold, bool italic) const;
     const CachedFontEntry& cachedFont(uint8_t fontRole, float sizePx, bool bold, bool italic) const;
     QString resolveImagePath(const QString& rawSrc) const;
+    void openLinkUrl(const QString& rawUrl);
+    void updateHoverState(const QPointF& pos, bool ctrlPressed);
     void resetCaretBlink();
 
     void applyImageUpdate(
@@ -165,6 +169,8 @@ private:
     QFont m_monoBase;
     KMarkPalette m_customPalette{};
     QRectF m_lastCaretRect{28.0, 20.0, 2.0, 22.0};
+    QPointF m_lastMousePos{-1.0, -1.0};
+    QString m_lastHoveredLink;
     float m_lastFontPx = 16.0f;
     QTimer m_caretTimer;
     bool m_caretVisible = true;

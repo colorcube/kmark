@@ -5,7 +5,9 @@ use kmark_syntax::{ImageSize, InlineTokenKind, StyleFlags, parse_inline_tokens};
 use crate::context::{
     CodeLineSpec, DEFAULT_IMAGE_MAX_H, InlineLineSpec, LayoutCtx, MIN_IMAGE_DIM_PX,
 };
-use crate::engine::{DrawCmd, PositionedGlyphSpan, RectF, VisualRow};
+use crate::engine::{
+    DrawCmd, PositionedGlyphSpan, RawRowPaintSpec, RectF, VisualRow, emit_segmented_raw_row,
+};
 use crate::measurer::{FontMetrics, FontRole, MeasuredRun, TextMeasurer};
 
 pub(crate) fn layout_inline_line(ctx: &mut LayoutCtx<'_>, spec: InlineLineSpec) -> f32 {
@@ -690,31 +692,25 @@ pub(crate) fn layout_plain_code_line(ctx: &mut LayoutCtx<'_>, spec: CodeLineSpec
         .measure_run(&txt, FontRole::Monospace, code_px, false, false);
     let h = m.metrics.line_height.max(code_px * 1.38);
     let base_off = (h - (m.metrics.ascent + m.metrics.descent)) * 0.5 + m.metrics.ascent;
-    if !txt.is_empty() {
-        ctx.fg_cmds.push(DrawCmd::Text {
-            x: start_x,
-            baseline_y: (y - ctx.scroll_y) + base_off,
-            text: txt,
+    let line_urls = kmark_syntax::find_urls_in_text(&txt);
+    let (spans, w) = emit_segmented_raw_row(
+        RawRowPaintSpec {
+            line_txt: &txt,
+            line_doc_start: doc_range.start,
+            row_rel_range: 0..txt.len(),
+            measured_line: &m,
+            urls: &line_urls,
+            start_x,
+            baseline_v: (y - ctx.scroll_y) + base_off,
+            paint: true,
             role: FontRole::Monospace,
-            size_px: code_px,
+            font_px: code_px,
             bold: false,
-            italic: false,
-            color,
-        });
-    }
-    let w = m.total_width;
-    let spans = if doc_range.is_empty() {
-        Vec::new()
-    } else {
-        vec![PositionedGlyphSpan {
-            doc_range: doc_range.clone(),
-            x: start_x,
-            width: w,
-            measured: m,
-            is_hidden_marker: false,
-            link_url: None,
-        }]
-    };
+            base_color: color,
+            link_color: ctx.config.palette.link_fg,
+        },
+        &mut ctx.fg_cmds,
+    );
     ctx.visual_rows.push(VisualRow {
         y_doc: y,
         height: h,
