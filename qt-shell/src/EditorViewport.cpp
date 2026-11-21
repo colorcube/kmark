@@ -866,6 +866,57 @@ void EditorViewport::pasteFromClipboard() {
     }
 }
 
+bool EditorViewport::canPasteClipboardAsTable() const {
+    const QMimeData* mime = QApplication::clipboard()->mimeData();
+    if (mime == nullptr) {
+        return false;
+    }
+    const QByteArray plainUtf8 = mime->hasText() ? mime->text().toUtf8() : QByteArray();
+    const QByteArray htmlUtf8 = mime->hasHtml() ? mime->html().toUtf8() : QByteArray();
+    if (plainUtf8.isEmpty() && htmlUtf8.isEmpty()) {
+        return false;
+    }
+    return kmark_can_parse_clipboard_table(
+        plainUtf8.isEmpty() ? nullptr : plainUtf8.constData(),
+        htmlUtf8.isEmpty() ? nullptr : htmlUtf8.constData()
+    );
+}
+
+bool EditorViewport::pasteAsMarkdownTable() {
+    if (m_session == nullptr) {
+        return false;
+    }
+    const QMimeData* mime = QApplication::clipboard()->mimeData();
+    if (mime == nullptr) {
+        return false;
+    }
+    const QByteArray plainUtf8 = mime->hasText() ? mime->text().toUtf8() : QByteArray();
+    const QByteArray htmlUtf8 = mime->hasHtml() ? mime->html().toUtf8() : QByteArray();
+    if (plainUtf8.isEmpty() && htmlUtf8.isEmpty()) {
+        return false;
+    }
+    const bool ok = kmark_session_paste_as_table(
+        m_session,
+        plainUtf8.isEmpty() ? nullptr : plainUtf8.constData(),
+        htmlUtf8.isEmpty() ? nullptr : htmlUtf8.constData()
+    );
+    if (ok) {
+        notifyDocumentChanged();
+    }
+    return ok;
+}
+
+bool EditorViewport::convertSelectionOrBlockToTable() {
+    if (m_session == nullptr) {
+        return false;
+    }
+    const bool ok = kmark_session_convert_to_table(m_session);
+    if (ok) {
+        notifyDocumentChanged();
+    }
+    return ok;
+}
+
 bool EditorViewport::event(QEvent* ev) {
     /* Intercept Tab / Backtab inside the editor so focus doesn't jump out of tables/lists! */
     if (ev->type() == QEvent::KeyPress) {
@@ -1386,10 +1437,23 @@ void EditorViewport::contextMenuEvent(QContextMenuEvent* event) {
     }
 
     /* Standard KDE editor context menu when right-clicking non-image text */
-    const KMarkToolbarState st = kmark_session_toolbar_state(m_session);
     char* rawSel = kmark_session_selected_text_alloc(m_session);
     const bool hasSelection = (rawSel != nullptr && rawSel[0] != '\0');
     kmark_string_free(rawSel);
+
+    if (!hasSelection && event->reason() != QContextMenuEvent::Keyboard) {
+        kmark_session_drop_cursor_at(
+            m_session,
+            static_cast<float>(hitPos.x()),
+            static_cast<float>(hitPos.y())
+        );
+        notifyDocumentChanged();
+    }
+
+    const KMarkToolbarState st = kmark_session_toolbar_state(m_session);
+    const bool canConvertTable =
+        (!st.in_table || hasSelection) && kmark_session_can_convert_to_table(m_session);
+    const bool canPasteTable = canPasteClipboardAsTable();
 
     QString linkUrl;
     char* rawLink = kmark_session_link_at_alloc(
@@ -1423,6 +1487,15 @@ void EditorViewport::contextMenuEvent(QContextMenuEvent* event) {
             QApplication::clipboard()->setText(linkUrl);
         });
 
+        menu.addSeparator();
+    }
+
+    if (canConvertTable) {
+        QAction* actConvertTbl = menu.addAction(
+            QIcon::fromTheme(QStringLiteral("insert-table")),
+            trBi(lang, "Convert to Markdown &Table", "In Markdown-&Tabelle umwandeln")
+        );
+        connect(actConvertTbl, &QAction::triggered, this, &EditorViewport::convertSelectionOrBlockToTable);
         menu.addSeparator();
     }
 
@@ -1467,6 +1540,14 @@ void EditorViewport::contextMenuEvent(QContextMenuEvent* event) {
         trBi(lang, "&Paste", "&Einfügen")
     );
     connect(actPaste, &QAction::triggered, this, &EditorViewport::pasteFromClipboard);
+
+    if (canPasteTable) {
+        QAction* actPasteTbl = menu.addAction(
+            QIcon::fromTheme(QStringLiteral("insert-table")),
+            trBi(lang, "Paste as Markdown &Table", "Als Markdown-&Tabelle einfügen")
+        );
+        connect(actPasteTbl, &QAction::triggered, this, &EditorViewport::pasteAsMarkdownTable);
+    }
 
     menu.addSeparator();
 

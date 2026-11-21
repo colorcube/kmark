@@ -9,6 +9,7 @@ pub mod reference;
 pub mod sample;
 pub mod search;
 pub mod session;
+pub mod table_import;
 
 pub use commands::{ArmedStyle, COMMAND_CATALOG, Command, CommandDescriptor};
 pub use format::format_markdown_document;
@@ -21,6 +22,10 @@ pub use search::{SearchOptions, SearchState};
 pub use session::{
     ActiveToolbarState, DocumentTab, EngineError, ExternalDiskState, ImageAtPoint,
     LayoutOptionsUpdate, PointerAction, RenderStateStamp, Session,
+};
+pub use table_import::{
+    ImportedTable, convert_html_to_markdown_table, convert_text_to_markdown_table,
+    parse_foreign_table, parse_html_table,
 };
 
 #[cfg(test)]
@@ -956,5 +961,122 @@ fn demo() {
         assert!(session.jump_to_anchor("#zielabschnitt"));
         let head = session.active_doc().unwrap().selection.head;
         assert_eq!(head, "# ".len());
+    }
+
+    #[test]
+    fn converts_console_box_tables_with_multiline_cells_and_blank_lines_plus_csv_tsv_and_html() {
+        // 1. Exact real-world terminal box-drawing sample from Ordo #324 (including blank lines
+        //    between rows and multi-line word-wrapped cells inside `├───┼───┤` bands!)
+        let console_box = "\
+Einleitung vorher
+
+┌───────┬──────────────────────────────────────┬──────────────────────────────────────────────────────────────────────┐
+
+│ # │ Punkt │ Bewertung │
+
+├───────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+
+│ 1 │ DDC-Zustand „vorher“ beim Verwerfen │ Doppelt abgesichert: copy.deepcopy(disp) für den Controller plus │
+
+│ │ und in der A/B-Vorschau │ (Worker verändert GUI-Daten) erledigt. │
+
+├───────┼──────────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+
+│ 8, │ │ │
+
+│ 13, │ Warnungen │ Alles-clippt-Warnung in 1a | DDC-Readback nach 1c sind drin. │
+
+│ 14 │ │ │
+
+└───────┴──────────────────────────────────────┴──────────────────────────────────────────────────────────────────────┘
+
+Absatz danach";
+
+        let mut session = Session::new_headless();
+        session.insert_text(console_box);
+
+        // Place collapsed cursor right inside the middle of the console box table (no selection needed!)
+        let mid_offset = console_box.find("Warnungen").unwrap();
+        session.jump_to_byte_offset(mid_offset);
+        assert!(session.can_convert_to_table());
+        assert!(session.convert_to_markdown_table());
+
+        let doc = session.active_doc().unwrap();
+        let converted = doc.rope.to_string_lossless();
+        assert!(converted.starts_with("Einleitung vorher\n\n| #"));
+        assert!(converted.ends_with("|\n\nAbsatz danach"));
+
+        // Verify parsed GFM Table AST has 2 merged body rows, 3 columns, and escaped `\|`
+        let tbl = doc
+            .blocks
+            .iter()
+            .find_map(|b| match &b.kind {
+                BlockKind::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("Expected converted Markdown Table block");
+        assert_eq!(tbl.col_count, 3);
+        assert_eq!(tbl.body_rows.len(), 2);
+        assert_eq!(
+            doc.rope
+                .slice_to_string(tbl.body_rows[0].cells[1].trimmed_range.clone()),
+            "DDC-Zustand „vorher“ beim Verwerfen und in der A/B-Vorschau"
+        );
+        assert_eq!(
+            doc.rope
+                .slice_to_string(tbl.body_rows[1].cells[0].trimmed_range.clone()),
+            "8, 13, 14"
+        );
+        assert!(
+            doc.rope
+                .slice_to_string(tbl.body_rows[1].cells[2].trimmed_range.clone())
+                .contains("\\|")
+        );
+
+        // Single-step Undo restores the exact original console dump
+        session.execute_command(Command::Undo);
+        assert_eq!(
+            session.active_doc().unwrap().rope.to_string_lossless(),
+            console_box
+        );
+
+        // 2. `psql` output with single header separator and `(2 rows)` footer
+        let psql = "\
+ id |  name  | role
+----+--------+-------
+  1 | Alice  | admin
+  2 | Bob    | user
+(2 rows)";
+        let psql_tbl = parse_foreign_table(psql).expect("Expected psql table");
+        assert_eq!(psql_tbl.cols, 3);
+        assert_eq!(psql_tbl.rows.len(), 3);
+        assert_eq!(psql_tbl.rows[0], vec!["id", "name", "role"]);
+        assert_eq!(psql_tbl.rows[2], vec!["2", "Bob", "user"]);
+
+        // 3. RFC-4180 CSV & semicolon-CSV with quoted commas, escaped `""`, and multi-line cells
+        let csv = "Produkt,Beschreibung,Preis\n\"KMark \"\"Pro\"\"\",\"Editor,\nLinux/KDE\",0 €\n";
+        let csv_tbl = parse_foreign_table(csv).expect("Expected RFC-4180 CSV table");
+        assert_eq!(csv_tbl.cols, 3);
+        assert_eq!(
+            csv_tbl.rows[1],
+            vec!["KMark \"Pro\"", "Editor, Linux/KDE", "0 €"]
+        );
+
+        // 4. HTML `<table>` clipboard paste via `paste_as_markdown_table`
+        let mut html_sess = Session::new_headless();
+        html_sess.insert_text("Notiz:");
+        let html_clip = "<table><tr><th>Taste</th><th>Aktion</th></tr><tr><td>Strg+Alt+T</td><td>Tabelle &amp; Grid | Konverter</td></tr></table>";
+        assert!(Session::can_paste_as_table("", html_clip));
+        assert!(html_sess.paste_as_markdown_table("", html_clip));
+        let html_out = html_sess.active_doc().unwrap().rope.to_string_lossless();
+        assert!(html_out.contains("| Taste"));
+        assert!(html_out.contains("Tabelle & Grid \\| Konverter"));
+
+        // 5. Normal prose with commas is never falsely classified as a convertible table
+        let prose = "Hallo zusammen,\ndas ist ein ganz normaler längerer deutscher Satz, der zwar ein Komma pro Zeile hat, aber natürlich Fließtext ist.";
+        let mut prose_sess = Session::new_headless();
+        prose_sess.insert_text(prose);
+        prose_sess.jump_to_byte_offset(10);
+        assert!(!prose_sess.can_convert_to_table());
     }
 }

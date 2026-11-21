@@ -37,6 +37,9 @@ public:
     void copySelectionToClipboard();
     void cutSelectionToClipboard();
     void pasteFromClipboard();
+    bool canPasteClipboardAsTable() const;
+    bool pasteAsMarkdownTable();
+    bool convertSelectionOrBlockToTable();
 
 signals:
     void stateChanged();

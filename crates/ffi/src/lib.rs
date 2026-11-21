@@ -1265,6 +1265,7 @@ pub extern "C" fn kmark_session_exec_command(session: *mut KMarkSession, cmd_id:
             51 => Some(Command::SetHeadingMarks(HeadingMarkStyle::SlantedBars)),
             52 => Some(Command::SetHeadingMarks(HeadingMarkStyle::HashSymbol)),
             53 => Some(Command::SetHeadingMarks(HeadingMarkStyle::None)),
+            54 => Some(Command::ConvertToTable),
             _ => None,
         };
         if let Some(cmd) = mapped {
@@ -1276,6 +1277,44 @@ pub extern "C" fn kmark_session_exec_command(session: *mut KMarkSession, cmd_id:
 #[unsafe(no_mangle)]
 pub extern "C" fn kmark_session_format_document(session: *mut KMarkSession) -> bool {
     with_session_mut(session, false, |s| s.session.format_active_document())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_can_convert_to_table(session: *const KMarkSession) -> bool {
+    with_session_ref(session, false, false, |s| s.session.can_convert_to_table())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_convert_to_table(session: *mut KMarkSession) -> bool {
+    with_session_mut(session, false, |s| s.session.convert_to_markdown_table())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_can_parse_clipboard_table(
+    plain_utf8: *const c_char,
+    html_utf8: *const c_char,
+) -> bool {
+    let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `cstr_to_str` handles null pointers and non-UTF8 bytes defensively.
+        let plain = unsafe { cstr_to_str(plain_utf8) };
+        let html = unsafe { cstr_to_str(html_utf8) };
+        Session::can_paste_as_table(plain, html)
+    }));
+    res.unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmark_session_paste_as_table(
+    session: *mut KMarkSession,
+    plain_utf8: *const c_char,
+    html_utf8: *const c_char,
+) -> bool {
+    with_session_mut(session, false, |s| {
+        // SAFETY: `cstr_to_str` handles null pointers and non-UTF8 bytes defensively.
+        let plain = unsafe { cstr_to_str(plain_utf8) };
+        let html = unsafe { cstr_to_str(html_utf8) };
+        s.session.paste_as_markdown_table(plain, html)
+    })
 }
 
 #[unsafe(no_mangle)]

@@ -1350,6 +1350,10 @@ impl Session {
             Command::TableSetAlign(align) => {
                 Self::exec_table_op(tab, TableOp::SetAlign(align));
             }
+            Command::ConvertToTable => {
+                let _ = self.convert_to_markdown_table();
+                return;
+            }
             Command::FormatDocument => {
                 let _ = self.format_active_document();
                 return;
@@ -1370,6 +1374,175 @@ impl Session {
         {
             self.search.recompute(&t.rope, t.selection.head);
         }
+    }
+
+    /// Returns `true` if the active selection or the foreign table block around the caret can be
+    /// converted into a GFM Markdown table (`#324`).
+    #[must_use]
+    pub fn can_convert_to_table(&self) -> bool {
+        let Some(tab) = self.active_doc() else {
+            return false;
+        };
+        crate::table_import::find_and_convert_table_at_selection(
+            &tab.rope,
+            &tab.blocks,
+            tab.selection,
+        )
+        .is_some()
+    }
+
+    /// Converts the active selection or the foreign table block around the caret (Unicode box table,
+    /// ASCII `+---+---+` / `psql` grid, TSV, or CSV) into a padded GFM Markdown table (`#324`).
+    pub fn convert_to_markdown_table(&mut self) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        let Some((range, md)) = crate::table_import::find_and_convert_table_at_selection(
+            &tab.rope,
+            &tab.blocks,
+            tab.selection,
+        ) else {
+            return false;
+        };
+
+        let prefix = if range.start == 0 {
+            ""
+        } else if tab.rope.byte_at(range.start.saturating_sub(1)) != Some(b'\n') {
+            "\n\n"
+        } else if range.start >= 2 && tab.rope.byte_at(range.start.saturating_sub(2)) != Some(b'\n')
+        {
+            "\n"
+        } else {
+            ""
+        };
+
+        let suffix = if range.end >= tab.rope.len_bytes() {
+            ""
+        } else if tab.rope.byte_at(range.end) != Some(b'\n') {
+            "\n\n"
+        } else if range.end.saturating_add(1) < tab.rope.len_bytes()
+            && tab.rope.byte_at(range.end.saturating_add(1)) != Some(b'\n')
+        {
+            "\n"
+        } else {
+            ""
+        };
+
+        let replacement = format!("{prefix}{md}{suffix}");
+        if tab.rope.slice_to_string(range.clone()) == replacement {
+            return false;
+        }
+
+        tab.armed_styles.clear();
+        let table_start = range.start.saturating_add(prefix.len());
+        let table_end = table_start.saturating_add(md.len());
+
+        let mut next_rope = tab.rope.clone();
+        next_rope.replace_range(range, &replacement);
+
+        // Place collapsed caret cleanly at the first header cell (or end of converted table).
+        let mut next_sel = Selection::collapsed(table_end);
+        let reparsed = parse_blocks(&next_rope);
+        for blk in &reparsed {
+            if blk.byte_range.start <= table_start
+                && blk.byte_range.end > table_start
+                && let BlockKind::Table(tbl) = &blk.kind
+                && let Some(cell0) = tbl.header_row.cells.first()
+            {
+                next_sel = Selection::collapsed(cell0.trimmed_range.start);
+                break;
+            }
+        }
+
+        tab.commit_edit(next_rope, next_sel, EditGroup::Discrete);
+        if !self.search.query.is_empty()
+            && let Some(t) = self.tabs.get(self.active_tab)
+        {
+            self.search.recompute(&t.rope, t.selection.head);
+        }
+        true
+    }
+
+    /// Returns `true` if clipboard `plain_text` or `html_text` can be converted into a Markdown table.
+    #[must_use]
+    pub fn can_paste_as_table(plain_text: &str, html_text: &str) -> bool {
+        (!plain_text.trim().is_empty()
+            && crate::table_import::convert_text_to_markdown_table(plain_text).is_some())
+            || (!html_text.trim().is_empty()
+                && crate::table_import::convert_html_to_markdown_table(html_text).is_some())
+    }
+
+    /// Converts clipboard `plain_text` (box/grid/TSV/CSV) or `html_text` (`<table>`) into a GFM
+    /// Markdown table and inserts it at the active selection (`#324`).
+    pub fn paste_as_markdown_table(&mut self, plain_text: &str, html_text: &str) -> bool {
+        let md_opt = if !plain_text.trim().is_empty() {
+            crate::table_import::convert_text_to_markdown_table(plain_text)
+        } else {
+            None
+        }
+        .or_else(|| {
+            if !html_text.trim().is_empty() {
+                crate::table_import::convert_html_to_markdown_table(html_text)
+            } else {
+                None
+            }
+        });
+
+        let Some(md) = md_opt else {
+            return false;
+        };
+
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        tab.ime_preedit = None;
+        tab.armed_styles.clear();
+
+        let sel_range = tab.selection.range();
+        let prefix = if sel_range.start == 0 {
+            ""
+        } else if tab.rope.byte_at(sel_range.start.saturating_sub(1)) != Some(b'\n') {
+            "\n\n"
+        } else if sel_range.start >= 2
+            && tab.rope.byte_at(sel_range.start.saturating_sub(2)) != Some(b'\n')
+        {
+            "\n"
+        } else {
+            ""
+        };
+
+        let suffix = if sel_range.end >= tab.rope.len_bytes() {
+            "\n"
+        } else if tab.rope.byte_at(sel_range.end) != Some(b'\n') {
+            "\n\n"
+        } else if sel_range.end.saturating_add(1) < tab.rope.len_bytes()
+            && tab.rope.byte_at(sel_range.end.saturating_add(1)) != Some(b'\n')
+        {
+            "\n"
+        } else {
+            ""
+        };
+
+        let full = format!("{prefix}{md}{suffix}");
+        let caret_after = sel_range
+            .start
+            .saturating_add(prefix.len())
+            .saturating_add(md.len());
+
+        let mut next_rope = tab.rope.clone();
+        next_rope.replace_range(sel_range, &full);
+        tab.commit_edit(
+            next_rope,
+            Selection::collapsed(caret_after),
+            EditGroup::Discrete,
+        );
+
+        if !self.search.query.is_empty()
+            && let Some(t) = self.tabs.get(self.active_tab)
+        {
+            self.search.recompute(&t.rope, t.selection.head);
+        }
+        true
     }
 
     /// Formats the active Markdown document (`MD022`/`MD031`/`MD032`/`MD058`, table alignment,

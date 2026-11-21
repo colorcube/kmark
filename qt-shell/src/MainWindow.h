@@ -236,6 +236,8 @@ private:
     QAction* m_actFormatDoc = nullptr;
 
     QAction* m_actInsTable = nullptr;
+    QAction* m_actConvertToTable = nullptr;
+    QAction* m_actPasteAsTable = nullptr;
     QAction* m_actRowAbove = nullptr;
     QAction* m_actRowBelow = nullptr;
     QAction* m_actRowDel = nullptr;

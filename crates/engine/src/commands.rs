@@ -86,6 +86,7 @@ pub enum Command {
     TableInsertColRight,
     TableDeleteCol,
     TableSetAlign(ColumnAlign),
+    ConvertToTable,
     FormatDocument,
     SetViewMode(ViewMode),
     SetHeadingMarks(HeadingMarkStyle),
@@ -252,6 +253,13 @@ pub const COMMAND_CATALOG: &[CommandDescriptor] = &[
         id: "table.insert",
         label_de: "Tabelle einfügen…",
         shortcut: "",
+        icon_theme: "insert-table",
+        category_de: "Tabelle",
+    },
+    CommandDescriptor {
+        id: "table.convert",
+        label_de: "In Markdown-Tabelle umwandeln",
+        shortcut: "Ctrl+Alt+T",
         icon_theme: "insert-table",
         category_de: "Tabelle",
     },
@@ -1035,6 +1043,35 @@ pub(crate) struct EditableTable {
 }
 
 impl EditableTable {
+    pub(crate) fn new(
+        cols: usize,
+        mut alignments: Vec<ColumnAlign>,
+        mut rows: Vec<Vec<String>>,
+    ) -> Self {
+        let clean_cols = cols.max(1);
+        alignments.resize(clean_cols, ColumnAlign::Left);
+        for row in &mut rows {
+            row.resize(clean_cols, String::new());
+        }
+        Self {
+            cols: clean_cols,
+            alignments,
+            rows,
+        }
+    }
+
+    pub(crate) fn cols(&self) -> usize {
+        self.cols
+    }
+
+    pub(crate) fn alignments(&self) -> &[ColumnAlign] {
+        &self.alignments
+    }
+
+    pub(crate) fn rows(&self) -> &[Vec<String>] {
+        &self.rows
+    }
+
     pub(crate) fn from_ast(rope: &Rope, table: &TableBlock) -> Self {
         let cols = table.col_count.max(1);
         let mut alignments = table.alignments.clone();

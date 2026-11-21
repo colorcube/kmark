@@ -180,6 +180,9 @@ Tabellen bestehen aus einer Kopfzeile, einer Ausrichtungszeile (`:---` links, `:
 
 - **Navigation**: <kbd>Tab</kbd> springt zur nächsten Zelle, <kbd>Shift+Tab</kbd> zur vorherigen.
 - **Neue Zeile anfügen**: <kbd>Tab</kbd> in der letzten Zelle unten rechts hängt automatisch eine neue Tabellenzeile an.
+- **Fremdformate umwandeln (CSV, TSV, Konsolen-Rahmentabellen & HTML)**:
+  - `Tabelle -> In Markdown-Tabelle umwandeln` (<kbd>Ctrl+Alt+T</kbd> oder per Rechtsklick): Wandelt markierten Text oder die Tabelle an der Cursorposition (z. B. CSV/Semikolon-CSV, TSV, `psql`/`+---+---+` oder Unicode-Konsolentabellen `┌───┬───┐` inkl. mehrzeiliger Zellen) in eine saubere Markdown-Tabelle um.
+  - `Tabelle -> Als Markdown-Tabelle einfügen` (<kbd>Ctrl+Alt+V</kbd> oder per Rechtsklick): Fügt eine Tabelle direkt aus der Zwischenablage (Terminal, LibreOffice Calc, Browser-HTML) als Markdown-Tabelle ein (<kbd>Ctrl+V</kbd> fügt immer unveränderten Rohtext ein).
 - **Struktur-Befehle**: Über das Menü `Tabelle` fügst du Zeilen/Spalten ein, löschst sie oder änderst die Spaltenausrichtung — KMark formatiert das zugrunde liegende Markdown-Rohgitter dabei automatisch sauber ausgerichtet neu!
 
 ---
@@ -189,15 +192,15 @@ Tabellen bestehen aus einer Kopfzeile, einer Ausrichtungszeile (`:---` links, `:
 | Bereich | Funktion | Tastenkürzel |
 | :--- | :--- | :---: |
 | **Datei** | Neu / Öffnen / Zuletzt geöffnete Dateien / Speichern / Speichern unter | <kbd>Ctrl+N</kbd> / <kbd>Ctrl+O</kbd> / Menü / <kbd>Ctrl+S</kbd> / <kbd>Ctrl+Shift+S</kbd> |
-| **Datei** | Drucken / Tab schließen / Beenden | <kbd>Ctrl+P</kbd> / <kbd>Ctrl+W</kbd> / <kbd>Ctrl+Q</kbd> |
-| **Bearbeiten** | Rückgängig / Wiederherstellen | <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> |
+| **Datei** | Neu laden / Drucken / Tab schließen / Beenden | <kbd>F5</kbd> / <kbd>Ctrl+P</kbd> / <kbd>Ctrl+W</kbd> / <kbd>Ctrl+Q</kbd> |
+| **Bearbeiten** | Rückgängig / Wiederherstellen / Als Markdown-Tabelle einfügen | <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> / <kbd>Ctrl+Alt+V</kbd> |
 | **Bearbeiten** | Suchen / Suchen & Ersetzen | <kbd>Ctrl+F</kbd> / <kbd>Ctrl+R</kbd> |
 | **Ansicht** | Formatiert / Live-Vorschau / Quelltext / Reintext | <kbd>Ctrl+Alt+1</kbd> … <kbd>Ctrl+Alt+4</kbd> |
 | **Ansicht** | Ordnerbaum (inkl. *Aktive Datei aufklappen* oben rechts) / Gliederung / Zeilennummern | <kbd>F7</kbd> / <kbd>F9</kbd> / <kbd>F11</kbd> |
-| **Ansicht** | Zeilenumbruch / Fokus-Modus / Schreibmaschinen-Modus | <kbd>F10</kbd> / <kbd>Ctrl+Shift+F</kbd> / <kbd>Ctrl+Shift+M</kbd> |
-| **Ansicht** | Schrift vergrößern / verkleinern / zurücksetzen | <kbd>Ctrl++</kbd> / <kbd>Ctrl+-</kbd> / <kbd>Ctrl+)</kbd> |
+| **Ansicht** | Zeilenumbruch / Schrift vergrößern / verkleinern / zurücksetzen | <kbd>F10</kbd> / <kbd>Ctrl++</kbd> / <kbd>Ctrl+-</kbd> / <kbd>Ctrl+)</kbd> |
 | **Format** | Fett / Kursiv / Durchgestrichen / Textmarker / Inline-Code | <kbd>Ctrl+B</kbd> / <kbd>Ctrl+I</kbd> / <kbd>Ctrl+Shift+X</kbd> / <kbd>Ctrl+Shift+H</kbd> / <kbd>Ctrl+E</kbd> |
-| **Format** | Codeblock einfügen / Codeblock-Sprache ändern | <kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Alt+L</kbd> |
+| **Format** | Codeblock einfügen / Codeblock-Sprache / Markdown neu formatieren | <kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Alt+L</kbd> / <kbd>Ctrl+Shift+F</kbd> |
+| **Tabelle** | Auswahl / Block in Markdown-Tabelle umwandeln | <kbd>Ctrl+Alt+T</kbd> |
 | **Hilfe** | Markdown-Kurzreferenz / Markdown-Langreferenz | <kbd>F1</kbd> / <kbd>Shift+F1</kbd> |
 "#;
 
@@ -364,6 +367,9 @@ Tables consist of a header row, an alignment delimiter row (`:---` left, `:---:`
 
 - **Cell Navigation**: <kbd>Tab</kbd> advances to the next cell; <kbd>Shift+Tab</kbd> moves back.
 - **Auto-Append Row**: Pressing <kbd>Tab</kbd> in the bottom-right cell automatically appends a fresh row.
+- **Converting Foreign Table Formats (CSV, TSV, Console Box Tables & HTML)**:
+  - `Table -> Convert to Markdown Table` (<kbd>Ctrl+Alt+T</kbd> or right-click): Converts selected text or the foreign table block at the cursor (CSV/semicolon-CSV, TSV, `psql`/`+---+---+`, or Unicode terminal box tables `┌───┬───┐` including multi-line wrapped cells) into a clean GFM pipe table.
+  - `Table -> Paste as Markdown Table` (<kbd>Ctrl+Alt+V</kbd> or right-click): Converts and inserts a table from the clipboard (terminal, LibreOffice Calc, or browser HTML `<table>`), while <kbd>Ctrl+V</kbd> always pastes unaltered plain text.
 - **Table Menu**: Insert/delete rows and columns or change column alignment via the `Table` menu — KMark cleanly reformats the underlying Markdown pipe table automatically!
 
 ---
@@ -373,14 +379,14 @@ Tables consist of a header row, an alignment delimiter row (`:---` left, `:---:`
 | Category | Action | Shortcut |
 | :--- | :--- | :---: |
 | **File** | New / Open / Open Recent / Save / Save As | <kbd>Ctrl+N</kbd> / <kbd>Ctrl+O</kbd> / Menu / <kbd>Ctrl+S</kbd> / <kbd>Ctrl+Shift+S</kbd> |
-| **File** | Print / Close Tab / Quit | <kbd>Ctrl+P</kbd> / <kbd>Ctrl+W</kbd> / <kbd>Ctrl+Q</kbd> |
-| **Edit** | Undo / Redo | <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> |
+| **File** | Reload / Print / Close Tab / Quit | <kbd>F5</kbd> / <kbd>Ctrl+P</kbd> / <kbd>Ctrl+W</kbd> / <kbd>Ctrl+Q</kbd> |
+| **Edit** | Undo / Redo / Paste as Markdown Table | <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> / <kbd>Ctrl+Alt+V</kbd> |
 | **Edit** | Find / Find & Replace | <kbd>Ctrl+F</kbd> / <kbd>Ctrl+R</kbd> |
 | **View** | Formatted / Live Preview / Source / Plain Text | <kbd>Ctrl+Alt+1</kbd> … <kbd>Ctrl+Alt+4</kbd> |
 | **View** | Folder Tree (incl. top-right *Select Opened File*) / Outline / Line Numbers | <kbd>F7</kbd> / <kbd>F9</kbd> / <kbd>F11</kbd> |
-| **View** | Word Wrap / Focus Mode / Typewriter Mode | <kbd>F10</kbd> / <kbd>Ctrl+Shift+F</kbd> / <kbd>Ctrl+Shift+M</kbd> |
-| **View** | Zoom In / Zoom Out / Reset Zoom | <kbd>Ctrl++</kbd> / <kbd>Ctrl+-</kbd> / <kbd>Ctrl+)</kbd> |
+| **View** | Word Wrap / Zoom In / Zoom Out / Reset Zoom | <kbd>F10</kbd> / <kbd>Ctrl++</kbd> / <kbd>Ctrl+-</kbd> / <kbd>Ctrl+)</kbd> |
 | **Format** | Bold / Italic / Strikethrough / Highlight / Inline Code | <kbd>Ctrl+B</kbd> / <kbd>Ctrl+I</kbd> / <kbd>Ctrl+Shift+X</kbd> / <kbd>Ctrl+Shift+H</kbd> / <kbd>Ctrl+E</kbd> |
-| **Format** | Insert Code Block / Change Code Block Language | <kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Alt+L</kbd> |
+| **Format** | Insert Code Block / Code Block Language / Format Markdown Document | <kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Alt+L</kbd> / <kbd>Ctrl+Shift+F</kbd> |
+| **Table** | Convert Selection or Block to Markdown Table | <kbd>Ctrl+Alt+T</kbd> |
 | **Help** | Markdown Quick Reference / Complete Reference | <kbd>F1</kbd> / <kbd>Shift+F1</kbd> |
 "#;

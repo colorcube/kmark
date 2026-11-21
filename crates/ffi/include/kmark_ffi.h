@@ -173,6 +173,7 @@ enum KMarkCommandId {
     KMARK_ACT_MARKS_SLANTED         = 51,
     KMARK_ACT_MARKS_HASH            = 52,
     KMARK_ACT_MARKS_NONE            = 53,
+    KMARK_ACT_CONVERT_TO_TABLE      = 54,
 };
 
 /* Key codes */
@@ -406,6 +407,14 @@ void kmark_string_free(char* s);
 /* Commands, typing, IME, keyboard, mouse, drag-drop & scrolling */
 void kmark_session_exec_command(KMarkSession* session, uint32_t cmd_id);
 bool kmark_session_format_document(KMarkSession* session);
+bool kmark_session_can_convert_to_table(const KMarkSession* session);
+bool kmark_session_convert_to_table(KMarkSession* session);
+bool kmark_can_parse_clipboard_table(const char* plain_utf8, const char* html_utf8);
+bool kmark_session_paste_as_table(
+    KMarkSession* session,
+    const char* plain_utf8,
+    const char* html_utf8
+);
 void kmark_session_insert_code_fence(KMarkSession* session, const char* language_utf8);
 void kmark_session_set_code_fence_language(
     KMarkSession* session,

@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use kmark_buffer::encoding::{read_file_auto, write_file_atomic};
 use kmark_buffer::{LineEnding, Rope, Selection, TextEncoding};
-use kmark_engine::{COMMAND_CATALOG, Session, format_markdown_document};
+use kmark_engine::{
+    COMMAND_CATALOG, Session, convert_text_to_markdown_table, format_markdown_document,
+};
 use kmark_layout::FallbackMeasurer;
 use kmark_syntax::{BlockKind, export_html_document, extract_outline, parse_blocks};
 
@@ -21,6 +23,7 @@ fn main() -> ExitCode {
         "outline" => cmd_outline(args.get(1).map(String::as_str)),
         "html" => cmd_html(&args[1..]),
         "format" => cmd_format(&args[1..]),
+        "convert-table" => cmd_convert_table(&args[1..]),
         "commands" => {
             cmd_commands();
             Ok(())
@@ -51,12 +54,13 @@ fn print_usage() {
 kmark-cli — KMark Headless-Werkzeug (L0–L3 Rust-Engine)
 
 Verwendung:
-  kmark-cli info <datei>               Dokument-Statistik, Kodierung & Blockstruktur
-  kmark-cli outline <datei>            Überschriften-Gliederung (H1–H6) ausgeben
-  kmark-cli html <datei> [-o out.html] Eigenständiges HTML5-Dokument exportieren
-  kmark-cli format <datei> [-o out.md] Markdown-Dokument normgerecht neu formatieren
-  kmark-cli commands                   Alle registrierten Editor-Befehle & KDE-Shortcuts
-  kmark-cli bench                      Latenz-Benchmark über 6.000 bis 100.000 Zeilen"
+  kmark-cli info <datei>                  Dokument-Statistik, Kodierung & Blockstruktur
+  kmark-cli outline <datei>               Überschriften-Gliederung (H1–H6) ausgeben
+  kmark-cli html <datei> [-o out.html]    Eigenständiges HTML5-Dokument exportieren
+  kmark-cli format <datei> [-o out.md]    Markdown-Dokument normgerecht neu formatieren
+  kmark-cli convert-table <datei> [-o md] CSV/TSV/Konsolen-Tabelle in Markdown umwandeln
+  kmark-cli commands                      Alle registrierten Editor-Befehle & KDE-Shortcuts
+  kmark-cli bench                         Latenz-Benchmark über 6.000 bis 100.000 Zeilen"
     );
 }
 
@@ -191,6 +195,41 @@ fn cmd_format(args: &[String]) -> Result<(), String> {
         println!("Markdown neu formatiert: {}", dest.display());
     } else {
         println!("Bereits sauber formatiert: {}", dest.display());
+    }
+    Ok(())
+}
+
+fn cmd_convert_table(args: &[String]) -> Result<(), String> {
+    let Some(input_path) = args.first() else {
+        return Err(
+            "Bitte Eingabedatei angeben: kmark-cli convert-table <datei> [-o out.md]".to_owned(),
+        );
+    };
+    let mut out_path: Option<&str> = None;
+    let mut i = 1usize;
+    while i < args.len() {
+        if args.get(i).map(String::as_str) == Some("-o") {
+            out_path = args.get(i.saturating_add(1)).map(String::as_str);
+            i = i.saturating_add(2);
+        } else {
+            i = i.saturating_add(1);
+        }
+    }
+
+    let decoded = read_file_auto(Path::new(input_path)).map_err(|e| e.to_string())?;
+    let Some(mut md) = convert_text_to_markdown_table(&decoded.text) else {
+        return Err(
+            "Keine unterstützte Tabelle (CSV, TSV oder Konsolen-Rahmentabelle) erkannt.".to_owned(),
+        );
+    };
+    md.push('\n');
+
+    if let Some(dest) = out_path {
+        write_file_atomic(Path::new(dest), &md, TextEncoding::Utf8, LineEnding::Lf)
+            .map_err(|e| e.to_string())?;
+        println!("Markdown-Tabelle geschrieben: {dest}");
+    } else {
+        print!("{md}");
     }
     Ok(())
 }

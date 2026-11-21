@@ -1272,6 +1272,38 @@ void MainWindow::setupMenusAndToolbars() {
     m_actPaste->setShortcut(QKeySequence::Paste);
     connect(m_actPaste, &QAction::triggered, m_viewport, &EditorViewport::pasteFromClipboard);
 
+    m_actPasteAsTable = m_editMenu->addAction(
+        makeTableActionIcon(TableIconKind::InsertTable, palette()),
+        QString()
+    );
+    m_actPasteAsTable->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+V")));
+    connect(m_actPasteAsTable, &QAction::triggered, this, [this]() {
+        if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+            return;
+        }
+        const bool ok = m_viewport->pasteAsMarkdownTable();
+        syncOutlineTree();
+        syncUiState();
+        m_viewport->setFocus();
+        if (ok) {
+            statusBar()->showMessage(
+                T(
+                    "Clipboard inserted as Markdown table (Ctrl+Z to undo).",
+                    "Zwischenablage als Markdown-Tabelle eingefügt (Strg+Z macht rückgängig)."
+                ),
+                4000
+            );
+        } else {
+            statusBar()->showMessage(
+                T(
+                    "Clipboard does not contain a recognizable table (CSV, TSV, HTML, or console box table).",
+                    "Zwischenablage enthält keine erkennbare Tabelle (CSV, TSV, HTML oder Konsolen-Rahmentabelle)."
+                ),
+                4000
+            );
+        }
+    });
+
     m_actSelectAll = m_editMenu->addAction(icon("edit-select-all"), QString());
     m_actSelectAll->setShortcut(QKeySequence::SelectAll);
     connect(m_actSelectAll, &QAction::triggered, this, [this]() { dispatchCommand(KMARK_ACT_SELECT_ALL); });
@@ -1519,6 +1551,40 @@ void MainWindow::setupMenusAndToolbars() {
     m_actInsTable = m_tableMenu->addAction(makeTableActionIcon(TableIconKind::InsertTable, palette()), QString());
     connect(m_actInsTable, &QAction::triggered, this, &MainWindow::promptInsertTable);
 
+    m_actConvertToTable = m_tableMenu->addAction(
+        makeTableActionIcon(TableIconKind::InsertTable, palette()),
+        QString()
+    );
+    m_actConvertToTable->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+T")));
+    connect(m_actConvertToTable, &QAction::triggered, this, [this]() {
+        if (m_session == nullptr || kmark_session_is_poisoned(m_session)) {
+            return;
+        }
+        const bool ok = m_viewport->convertSelectionOrBlockToTable();
+        syncOutlineTree();
+        syncUiState();
+        m_viewport->setFocus();
+        if (ok) {
+            statusBar()->showMessage(
+                T(
+                    "Converted to Markdown table (Ctrl+Z to undo).",
+                    "In Markdown-Tabelle umgewandelt (Strg+Z macht rückgängig)."
+                ),
+                4000
+            );
+        } else {
+            statusBar()->showMessage(
+                T(
+                    "No convertible table (CSV, TSV, or console box table) found at cursor or selection.",
+                    "Keine umwandelbare Tabelle (CSV, TSV oder Konsolen-Rahmentabelle) an Cursor oder Auswahl gefunden."
+                ),
+                4000
+            );
+        }
+    });
+
+    m_tableMenu->addAction(m_actPasteAsTable);
+
     m_tableMenu->addSeparator();
     m_actRowAbove = m_tableMenu->addAction(makeTableActionIcon(TableIconKind::RowAbove, palette()), QString());
     m_actRowBelow = m_tableMenu->addAction(makeTableActionIcon(TableIconKind::RowBelow, palette()), QString());
@@ -1756,6 +1822,7 @@ void MainWindow::retranslateUi() {
     m_actCut->setText(T("Cu&t", "&Ausschneiden"));
     m_actCopy->setText(T("&Copy", "&Kopieren"));
     m_actPaste->setText(T("&Paste", "E&infügen"));
+    m_actPasteAsTable->setText(T("Paste as Markdown &Table", "Als Markdown-&Tabelle einfügen"));
     m_actSelectAll->setText(T("Select &All", "Alles aus&wählen"));
     m_actFind->setText(T("&Find…", "&Suchen…"));
     m_actReplace->setText(T("&Replace…", "&Ersetzen…"));
@@ -1818,6 +1885,7 @@ void MainWindow::retranslateUi() {
 
     m_tableMenu->setTitle(T("&Table", "&Tabelle"));
     m_actInsTable->setText(T("&Insert Table…", "&Tabelle einfügen…"));
+    m_actConvertToTable->setText(T("&Convert to Markdown Table", "In Markdown-&Tabelle umwandeln"));
     m_actRowAbove->setText(T("Insert Row &Above", "Zeile &oberhalb einfügen"));
     m_actRowBelow->setText(T("Insert Row &Below", "Zeile &unterhalb einfügen"));
     m_actRowDel->setText(T("&Delete Row", "Zeile &löschen"));
@@ -3308,6 +3376,12 @@ void MainWindow::refreshToolbarIcons() {
 
     if (m_actInsTable != nullptr) {
         m_actInsTable->setIcon(makeTableActionIcon(TableIconKind::InsertTable, pal));
+    }
+    if (m_actConvertToTable != nullptr) {
+        m_actConvertToTable->setIcon(makeTableActionIcon(TableIconKind::InsertTable, pal));
+    }
+    if (m_actPasteAsTable != nullptr) {
+        m_actPasteAsTable->setIcon(makeTableActionIcon(TableIconKind::InsertTable, pal));
     }
     if (m_actRowAbove != nullptr) {
         m_actRowAbove->setIcon(makeTableActionIcon(TableIconKind::RowAbove, pal));
